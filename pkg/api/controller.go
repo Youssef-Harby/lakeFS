@@ -32,7 +32,7 @@ import (
 	"github.com/treeverse/lakefs/pkg/catalog"
 	"github.com/treeverse/lakefs/pkg/cloud"
 	"github.com/treeverse/lakefs/pkg/config"
-	graveler "github.com/treeverse/lakefs/pkg/graveler"
+	"github.com/treeverse/lakefs/pkg/graveler"
 	"github.com/treeverse/lakefs/pkg/graveler/ref"
 	"github.com/treeverse/lakefs/pkg/httputil"
 	"github.com/treeverse/lakefs/pkg/kv"
@@ -3323,9 +3323,9 @@ func (c *Controller) RestoreRefsSubmit(w http.ResponseWriter, r *http.Request, b
 	c.LogAction(ctx, "restore_refs_submit", r, repository, "", "")
 
 	info := &catalog.RefsDumpInfo{
-		CommitsMetarangeId:  body.Refs.CommitsMetaRangeId,
-		TagsMetarangeId:     body.Refs.TagsMetaRangeId,
-		BranchesMetarangeId: body.Refs.BranchesMetaRangeId,
+		CommitsMetarangeId:  body.CommitsMetaRangeId,
+		TagsMetarangeId:     body.TagsMetaRangeId,
+		BranchesMetarangeId: body.BranchesMetaRangeId,
 	}
 	taskID, err := c.Catalog.RestoreRefsSubmit(ctx, repository, info)
 	if c.handleAPIError(ctx, w, r, err) {
@@ -3336,7 +3336,7 @@ func (c *Controller) RestoreRefsSubmit(w http.ResponseWriter, r *http.Request, b
 	})
 }
 
-func (c *Controller) RestoreRefsStatus(w http.ResponseWriter, r *http.Request, body apigen.RestoreRefsStatusJSONRequestBody, repository string, taskID string) {
+func (c *Controller) RestoreRefsStatus(w http.ResponseWriter, r *http.Request, repository string, taskID string) {
 	if !c.authorize(w, r, permissions.Node{
 		Type: permissions.NodeTypeAnd,
 		Nodes: []permissions.Node{
