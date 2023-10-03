@@ -138,14 +138,6 @@ type Interface interface {
 	Merge(ctx context.Context, repository, destinationBranch, sourceRef, committer, message string, metadata Metadata, strategy string) (string, error)
 	FindMergeBase(ctx context.Context, repositoryID string, destinationRef string, sourceRef string) (string, string, string, error)
 
-	// dump/load metadata
-	DumpCommits(ctx context.Context, repositoryID string) (string, error)
-	DumpBranches(ctx context.Context, repositoryID string) (string, error)
-	DumpTags(ctx context.Context, repositoryID string) (string, error)
-	LoadCommits(ctx context.Context, repositoryID, commitsMetaRangeID string) error
-	LoadBranches(ctx context.Context, repositoryID, branchesMetaRangeID string) error
-	LoadTags(ctx context.Context, repositoryID, tagsMetaRangeID string) error
-
 	// forward metadata for thick clients
 	GetMetaRange(ctx context.Context, repositoryID, metaRangeID string) (graveler.MetaRangeAddress, error)
 	GetRange(ctx context.Context, repositoryID, rangeID string) (graveler.RangeAddress, error)
@@ -176,6 +168,12 @@ type Interface interface {
 	SetLinkAddress(ctx context.Context, repository, physicalAddress string) error
 	VerifyLinkAddress(ctx context.Context, repository, physicalAddress string) error
 	DeleteExpiredLinkAddresses(ctx context.Context)
+
+	DumpRefsSubmit(ctx context.Context, repositoryID string) (string, error)
+	DumpRefsStatus(ctx context.Context, repositoryID string, id string) (*RefsDumpStatus, error)
+
+	RestoreRefsSubmit(ctx context.Context, repositoryID string, info *RefsDumpInfo) (string, error)
+	RestoreRefsStatus(ctx context.Context, repositoryID string, id string) (*RefsRestoreStatus, error)
 
 	io.Closer
 }
