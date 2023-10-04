@@ -20,6 +20,10 @@ import io.lakefs.clients.sdk.model.Error;
 import io.lakefs.clients.sdk.model.FindMergeBaseResult;
 import io.lakefs.clients.sdk.model.Merge;
 import io.lakefs.clients.sdk.model.MergeResult;
+import io.lakefs.clients.sdk.model.RefsDump;
+import io.lakefs.clients.sdk.model.RefsDumpStatus;
+import io.lakefs.clients.sdk.model.RefsRestoreStatus;
+import io.lakefs.clients.sdk.model.TaskInfo;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
@@ -57,6 +61,33 @@ public class RefsApiTest {
                 .prefix(prefix)
                 .delimiter(delimiter)
                 .type(type)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
+     * Dump repository refs (tags, commits, branches) to object store
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void dumpRefsStatusTest() throws ApiException {
+        String repository = null;
+        String taskId = null;
+        RefsDumpStatus response = api.dumpRefsStatus(repository, taskId)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
+     * Dump repository refs (tags, commits, branches) to object store
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void dumpRefsSubmitTest() throws ApiException {
+        String repository = null;
+        TaskInfo response = api.dumpRefsSubmit(repository)
                 .execute();
         // TODO: test validations
     }
@@ -115,6 +146,34 @@ public class RefsApiTest {
         Merge merge = null;
         MergeResult response = api.mergeIntoBranch(repository, sourceRef, destinationBranch)
                 .merge(merge)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
+     * Restore repository refs (tags, commits, branches) from object store
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void restoreRefsStatusTest() throws ApiException {
+        String repository = null;
+        String taskId = null;
+        RefsRestoreStatus response = api.restoreRefsStatus(repository, taskId)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
+     * Restore repository refs (tags, commits, branches) from object store
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void restoreRefsSubmitTest() throws ApiException {
+        String repository = null;
+        RefsDump refsDump = null;
+        TaskInfo response = api.restoreRefsSubmit(repository, refsDump)
                 .execute();
         // TODO: test validations
     }

@@ -67,8 +67,8 @@ const (
 	gcPeriodicCheckSize = 100000
 
 	taskIDNanoLength           = 20
-	dumpRefsTaskIDPrefix       = "RD"
-	restoreRestoreTaskIDPrefix = "RD"
+	dumpRefsTaskIDPrefix       = "DR"
+	restoreRestoreTaskIDPrefix = "RR"
 )
 
 type Path string
@@ -1814,7 +1814,7 @@ func (c *Catalog) DumpRefsStatus(ctx context.Context, repositoryID string, id st
 	if err != nil {
 		return nil, err
 	}
-	if isTaskID(dumpRefsTaskIDPrefix, id) {
+	if !isTaskID(dumpRefsTaskIDPrefix, id) {
 		return nil, graveler.ErrNotFound
 	}
 
@@ -1881,7 +1881,7 @@ func (c *Catalog) RestoreRefsStatus(ctx context.Context, repositoryID string, id
 	if err != nil {
 		return nil, err
 	}
-	if isTaskID(restoreRestoreTaskIDPrefix, id) {
+	if !isTaskID(restoreRestoreTaskIDPrefix, id) {
 		return nil, graveler.ErrNotFound
 	}
 
