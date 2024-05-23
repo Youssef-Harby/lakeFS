@@ -26,6 +26,9 @@ export default ({ command }) => {
       splitVendorChunkPlugin(),
     ],
     publicDir: './pub',
+    optimizeDeps: {
+      include: ['@geoarrow/deck.gl-layers']
+    },
   };
 
   // in development

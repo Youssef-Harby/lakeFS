@@ -1,14 +1,15 @@
-import React from 'react';
-import { createRoot } from 'react-dom/client';
+import React from "react";
+import { createRoot } from "react-dom/client";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 // styles
-import 'bootstrap/dist/css/bootstrap.css';
-import './styles/globals.css';
+import "bootstrap/dist/css/bootstrap.css";
+import "./styles/globals.css";
 
 // main page
-import {IndexPage} from './pages';
+import { IndexPage } from "./pages";
 
-const container = document.getElementById('root');
+const container = document.getElementById("root");
 if (!container) throw new Error("Failed to find root element!");
 
 const root = createRoot(container);
