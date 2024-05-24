@@ -1,37 +1,41 @@
 import React from "react";
 import DeckGL from "@deck.gl/react";
 import { MapViewState } from "@deck.gl/core";
-import { LineLayer } from "@deck.gl/layers";
+import { GeoArrowScatterplotLayer } from "@geoarrow/deck.gl-layers";
 import Map, { NavigationControl } from "react-map-gl/maplibre";
+import { Table } from "apache-arrow";
 
 const INITIAL_VIEW_STATE: MapViewState = {
   longitude: -122.41669,
   latitude: 37.7853,
-  zoom: 13,
+  zoom: 8,
+  maxZoom: 16,
   pitch: 0,
   bearing: 0,
 };
 
-type DataType = {
-  from: [longitude: number, latitude: number];
-  to: [longitude: number, latitude: number];
+type BasicMapProps = {
+  arrowTable: Table | null;
 };
 
-// Sample data for the LineLayer
-const data: DataType[] = [
-  { from: [-122.41669, 37.7853], to: [-122.41669, 37.781] },
-  { from: [-122.41669, 37.7853], to: [-122.41669, 37.789] },
-];
+const BasicMap: React.FC<BasicMapProps> = ({ arrowTable }) => {
+  if (!arrowTable) {
+    return <div>Loading...</div>;
+  }
 
-const BasicMap: React.FC = () => {
+  const geomColumn = arrowTable.getChild("geom");
+  if (!geomColumn) {
+    console.error("Geometry column 'geom' not found in the Arrow table");
+    return <div>Error: Geometry column not found</div>;
+  }
+
   const layers = [
-    new LineLayer<DataType>({
-      id: "line-layer",
-      data,
-      getSourcePosition: (d: DataType) => d.from,
-      getTargetPosition: (d: DataType) => d.to,
-      getColor: [255, 0, 0], // optional: set color
-      getWidth: 5, // optional: set line width
+    new GeoArrowScatterplotLayer({
+      id: "scatter-plot",
+      data: arrowTable,
+      getPosition: (d: Table) => d.getChild("geom"),
+      getFillColor: [255, 0, 255], // Optional: set color
+      getRadius: 100, // Optional: set point radius
     }),
   ];
 
