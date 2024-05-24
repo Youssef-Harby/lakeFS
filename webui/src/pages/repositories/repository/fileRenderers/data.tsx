@@ -26,11 +26,11 @@ export const DuckDBRenderer: FC<RendererComponent> = ({
 }) => {
   let initialQuery = `SELECT * FROM READ_PARQUET('lakefs://${repoId}/${refId}/${path}') LIMIT 20`;
   if (fileExtension === "csv") {
-    initialQuery = `SELECT *  FROM READ_CSV('lakefs://${repoId}/${refId}/${path}', AUTO_DETECT = TRUE) LIMIT 20`;
+    initialQuery = `SELECT * FROM READ_CSV('lakefs://${repoId}/${refId}/${path}', AUTO_DETECT = TRUE) LIMIT 20`;
   } else if (fileExtension === "geoparquet") {
-    initialQuery = `SELECT *,ST_AsText(ST_GeomFromWKB(geom)) as wkt FROM READ_PARQUET('lakefs://${repoId}/${refId}/${path}') LIMIT 20`;
+    initialQuery = `SELECT *, ST_GeomFromWKB(geom) as geometry FROM READ_PARQUET('lakefs://${repoId}/${refId}/${path}') LIMIT 20`;
   } else if (fileExtension === "tsv") {
-    initialQuery = `SELECT *  FROM READ_CSV('lakefs://${repoId}/${refId}/${path}', DELIM='\t', AUTO_DETECT=TRUE) LIMIT 20`;
+    initialQuery = `SELECT * FROM READ_CSV('lakefs://${repoId}/${refId}/${path}', DELIM='\t', AUTO_DETECT=TRUE) LIMIT 20`;
   }
   const [shouldSubmit, setShouldSubmit] = useState<boolean>(true);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -172,12 +172,14 @@ export const DuckDBRenderer: FC<RendererComponent> = ({
         </div>
       </Form>
       <div className="mt-3">{content}</div>
-      <div
-        className="map-container mt-3"
-        style={{ height: "50vh", width: "100%", position: "relative" }}
-      >
-        {fileExtension === "geoparquet" && <BasicMap />}{" "}
-      </div>
+      {fileExtension === "geoparquet" && (
+        <div
+          className="map-container mt-3"
+          style={{ height: "50vh", width: "100%", position: "relative" }}
+        >
+          <BasicMap arrowTable={data} />{" "}
+        </div>
+      )}
     </div>
   );
 };
