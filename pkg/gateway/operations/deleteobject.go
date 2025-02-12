@@ -42,6 +42,7 @@ func (controller *DeleteObject) HandleAbortMultipartUpload(w http.ResponseWriter
 
 	req = req.WithContext(logging.AddFields(ctx, logging.Fields{logging.UploadIDFieldKey: uploadID}))
 	err = o.BlockStore.AbortMultiPartUpload(ctx, block.ObjectPointer{
+		StorageID:        o.Repository.StorageID,
 		StorageNamespace: o.Repository.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       mpu.PhysicalAddress,
@@ -61,6 +62,10 @@ func (controller *DeleteObject) HandleAbortMultipartUpload(w http.ResponseWriter
 
 func (controller *DeleteObject) Handle(w http.ResponseWriter, req *http.Request, o *PathOperation) {
 	if o.HandleUnsupported(w, req, "tagging", "acl", "torrent") {
+		return
+	}
+	if o.Repository.ReadOnly {
+		_ = o.EncodeError(w, req, nil, gatewayerrors.Codes.ToAPIErr(gatewayerrors.ErrReadOnlyRepository))
 		return
 	}
 	query := req.URL.Query()

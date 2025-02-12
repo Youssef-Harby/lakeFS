@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/treeverse/lakefs/pkg/authentication"
-
 	"github.com/spf13/viper"
 	"github.com/treeverse/lakefs/pkg/actions"
 	"github.com/treeverse/lakefs/pkg/api"
@@ -18,6 +16,7 @@ import (
 	authmodel "github.com/treeverse/lakefs/pkg/auth/model"
 	authparams "github.com/treeverse/lakefs/pkg/auth/params"
 	"github.com/treeverse/lakefs/pkg/auth/setup"
+	"github.com/treeverse/lakefs/pkg/authentication"
 	"github.com/treeverse/lakefs/pkg/block"
 	"github.com/treeverse/lakefs/pkg/catalog"
 	"github.com/treeverse/lakefs/pkg/config"
@@ -40,7 +39,8 @@ func TestLocalLoad(t *testing.T) {
 	ctx := context.Background()
 	viper.Set(config.BlockstoreTypeKey, block.BlockstoreTypeLocal)
 
-	conf, err := config.NewConfig("")
+	cfg := &config.BaseConfig{}
+	cfg, err := config.NewConfig("", cfg)
 	testutil.MustDo(t, "config", err)
 
 	superuser := &authmodel.SuperuserConfiguration{
@@ -51,8 +51,8 @@ func TestLocalLoad(t *testing.T) {
 	}
 
 	kvStore := kvtest.GetStore(ctx, t)
-	authService := auth.NewAuthService(kvStore, crypt.NewSecretStore([]byte("some secret")), authparams.ServiceCache{}, logging.ContextUnavailable().WithField("service", "auth"))
-	meta := auth.NewKVMetadataManager("local_load_test", conf.Installation.FixedID, conf.Database.Type, kvStore)
+	authService := auth.NewBasicAuthService(kvStore, crypt.NewSecretStore([]byte("some secret")), authparams.ServiceCache{}, logging.FromContext(ctx))
+	meta := auth.NewKVMetadataManager("local_load_test", cfg.Installation.FixedID, cfg.Database.Type, kvStore)
 
 	blockstoreType := os.Getenv(testutil.EnvKeyUseBlockAdapter)
 	if blockstoreType == "" {
@@ -61,7 +61,7 @@ func TestLocalLoad(t *testing.T) {
 
 	blockAdapter := testutil.NewBlockAdapterByType(t, blockstoreType)
 	c, err := catalog.New(ctx, catalog.Config{
-		Config:       conf,
+		Config:       cfg,
 		KVStore:      kvStore,
 		PathProvider: upload.DefaultPathProvider,
 	})
@@ -74,19 +74,19 @@ func TestLocalLoad(t *testing.T) {
 	actionsService := actions.NewService(ctx, actions.NewActionsKVStore(kvStore), source, outputWriter, &actions.DecreasingIDGenerator{}, &stats.NullCollector{}, actions.Config{Enabled: true}, "")
 	c.SetHooksHandler(actionsService)
 
-	credentials, err := setup.CreateAdminUser(ctx, authService, conf, superuser)
+	credentials, err := setup.AddAdminUser(ctx, authService, superuser, false)
 	testutil.Must(t, err)
 
 	authenticator := auth.NewBuiltinAuthenticator(authService)
-	kvParams, err := kvparams.NewConfig(conf)
+	kvParams, err := kvparams.NewConfig(&cfg.Database)
 	testutil.Must(t, err)
 	migrator := kv.NewDatabaseMigrator(kvParams)
 	t.Cleanup(func() {
 		_ = c.Close()
 	})
-	auditChecker := version.NewDefaultAuditChecker(conf.Security.AuditCheckURL, "", nil)
+	auditChecker := version.NewDefaultAuditChecker(cfg.Security.AuditCheckURL, "", nil)
 	authenticationService := authentication.NewDummyService()
-	handler := api.Serve(conf, c, authenticator, authService, authenticationService, blockAdapter, meta, migrator, &stats.NullCollector{}, nil, actionsService, auditChecker, logging.ContextUnavailable(), nil, nil, upload.DefaultPathProvider, stats.DefaultUsageReporter)
+	handler := api.Serve(cfg, c, authenticator, authService, authenticationService, blockAdapter, meta, migrator, &stats.NullCollector{}, nil, actionsService, auditChecker, logging.ContextUnavailable(), nil, nil, upload.DefaultPathProvider, stats.DefaultUsageReporter)
 
 	ts := httptest.NewServer(handler)
 	defer ts.Close()

@@ -20,7 +20,7 @@ const (
 )
 
 //nolint:mnd
-func setDefaults(cfgType string) {
+func setBaseDefaults(cfgType string) {
 	switch cfgType {
 	case QuickstartConfiguration:
 		viper.SetDefault("installation.user_name", DefaultQuickstartUsername)
@@ -35,16 +35,15 @@ func setDefaults(cfgType string) {
 		viper.SetDefault(BlockstoreTypeKey, "local")
 	}
 
-	viper.SetDefault("blockstore.signing.secret_key", DefaultSigningSecretKey)
+	viper.SetDefault("installation.allow_inter_region_storage", true)
+
 	viper.SetDefault("listen_address", DefaultListenAddress)
 
 	viper.SetDefault("logging.format", "text")
 	viper.SetDefault("logging.level", DefaultLoggingLevel)
 	viper.SetDefault("logging.output", "-")
-
 	viper.SetDefault("logging.files_keep", 100)
 	viper.SetDefault("logging.audit_log_level", DefaultLoggingAuditLogLevel)
-
 	viper.SetDefault("logging.file_max_size_mb", (1<<10)*100) // 100MiB
 
 	viper.SetDefault("actions.enabled", true)
@@ -57,10 +56,11 @@ func setDefaults(cfgType string) {
 	viper.SetDefault("auth.cache.jitter", 3*time.Second)
 
 	viper.SetDefault("auth.logout_redirect_url", "/auth/login")
+
 	viper.SetDefault("auth.login_duration", 7*24*time.Hour)
 	viper.SetDefault("auth.login_max_duration", 14*24*time.Hour)
 
-	viper.SetDefault("auth.ui_config.rbac", "simplified")
+	viper.SetDefault("auth.ui_config.rbac", "none")
 	viper.SetDefault("auth.ui_config.login_failed_message", "The credentials don't match.")
 	viper.SetDefault("auth.ui_config.login_cookie_names", "internal_auth_session")
 
@@ -71,14 +71,6 @@ func setDefaults(cfgType string) {
 	viper.SetDefault("auth.oidc.persist_friendly_name", false)
 	viper.SetDefault("auth.cookie_auth_verification.persist_friendly_name", false)
 
-	viper.SetDefault("blockstore.local.path", "~/lakefs/data/block")
-	viper.SetDefault("blockstore.s3.region", "us-east-1")
-	viper.SetDefault("blockstore.s3.max_retries", 5)
-	viper.SetDefault("blockstore.s3.discover_bucket_region", true)
-	viper.SetDefault("blockstore.s3.pre_signed_expiry", 15*time.Minute)
-	viper.SetDefault("blockstore.s3.web_identity.session_expiry_window", 5*time.Minute)
-	viper.SetDefault("blockstore.s3.disable_pre_signed_ui", true)
-
 	viper.SetDefault("committed.local_cache.size_bytes", 1*1024*1024*1024)
 	viper.SetDefault("committed.local_cache.dir", "~/lakefs/data/cache")
 	viper.SetDefault("committed.local_cache.max_uploaders_per_writer", 10)
@@ -86,18 +78,36 @@ func setDefaults(cfgType string) {
 	viper.SetDefault("committed.local_cache.metarange_proportion", 0.1)
 
 	viper.SetDefault("committed.block_storage_prefix", "_lakefs")
+
 	viper.SetDefault("committed.permanent.min_range_size_bytes", 0)
 	viper.SetDefault("committed.permanent.max_range_size_bytes", 20*1024*1024)
 	viper.SetDefault("committed.permanent.range_raggedness_entries", 50_000)
+
 	viper.SetDefault("committed.sstable.memory.cache_size_bytes", 400_000_000)
 
 	viper.SetDefault("gateways.s3.domain_name", "s3.local.lakefs.io")
 	viper.SetDefault("gateways.s3.region", "us-east-1")
 	viper.SetDefault("gateways.s3.verify_unsupported", true)
 
+	// blockstore defaults
+	viper.SetDefault("blockstore.signing.secret_key", DefaultSigningSecretKey)
+
+	viper.SetDefault("blockstore.local.path", "~/lakefs/data/block")
+
+	viper.SetDefault("blockstore.s3.region", "us-east-1")
+	viper.SetDefault("blockstore.s3.max_retries", 5)
+	viper.SetDefault("blockstore.s3.discover_bucket_region", true)
+	viper.SetDefault("blockstore.s3.pre_signed_expiry", 15*time.Minute)
+	viper.SetDefault("blockstore.s3.web_identity.session_expiry_window", 5*time.Minute)
+	viper.SetDefault("blockstore.s3.disable_pre_signed_ui", true)
+
 	viper.SetDefault("blockstore.gs.s3_endpoint", "https://storage.googleapis.com")
 	viper.SetDefault("blockstore.gs.pre_signed_expiry", 15*time.Minute)
 	viper.SetDefault("blockstore.gs.disable_pre_signed_ui", true)
+
+	viper.SetDefault("blockstore.azure.try_timeout", 10*time.Minute)
+	viper.SetDefault("blockstore.azure.pre_signed_expiry", 15*time.Minute)
+	viper.SetDefault("blockstore.azure.disable_pre_signed_ui", true)
 
 	viper.SetDefault("stats.enabled", true)
 	viper.SetDefault("stats.address", "https://stats.lakefs.io")
@@ -105,10 +115,6 @@ func setDefaults(cfgType string) {
 	viper.SetDefault("stats.flush_size", 100)
 
 	viper.SetDefault("email_subscription.enabled", true)
-
-	viper.SetDefault("blockstore.azure.try_timeout", 10*time.Minute)
-	viper.SetDefault("blockstore.azure.pre_signed_expiry", 15*time.Minute)
-	viper.SetDefault("blockstore.azure.disable_pre_signed_ui", true)
 
 	viper.SetDefault("security.audit_check_interval", 24*time.Hour)
 	viper.SetDefault("security.audit_check_url", "https://audit.lakefs.io/audit")
@@ -146,8 +152,29 @@ func setDefaults(cfgType string) {
 	// 3ms of delay with ~300 requests/second per resource sounds like a reasonable tradeoff.
 	viper.SetDefault("graveler.max_batch_delay", 3*time.Millisecond)
 
+	viper.SetDefault("graveler.branch_ownership.enabled", false)
+	// ... but if branch ownership is enabled, set up some useful defaults!
+
+	// The single concurrent branch updater has these requirements from
+	// KV with these settings:
+	//
+	//   - Cleanly acquiring ownership performs 1 read operation and 1
+	//     write operation.  Releasing ownership performs another 1 read
+	//     operation and 1 write operation.
+	//
+	//   - While ownership is held, add 2.5 read and 2.5 write operation
+	//     per second, an additional ~7 read operations per second per
+	//     branch operation waiting to acquire ownership, and an
+	//     additional write operation per branch operation acquiring
+	//     ownership.
+
+	// See additional comments on MostlyCorrectOwner for how to compute these numbers.
+	viper.SetDefault("graveler.branch_ownership.refresh", 400*time.Millisecond)
+	viper.SetDefault("graveler.branch_ownership.acquire", 150*time.Millisecond)
+
 	viper.SetDefault("ugc.prepare_interval", time.Minute)
 	viper.SetDefault("ugc.prepare_max_file_size", 20*1024*1024)
 
+	viper.SetDefault("usage_report.enabled", true)
 	viper.SetDefault("usage_report.flush_interval", 5*time.Minute)
 }

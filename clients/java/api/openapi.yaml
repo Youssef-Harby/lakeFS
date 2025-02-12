@@ -1965,6 +1965,14 @@ paths:
           minimum: -1
           type: integer
         style: form
+      - description: string for searching relevant entries
+        explode: true
+        in: query
+        name: search
+        required: false
+        schema:
+          type: string
+        style: form
       responses:
         "200":
           content:
@@ -3114,6 +3122,15 @@ paths:
           maximum: 1000
           minimum: -1
           type: integer
+        style: form
+      - explode: true
+        in: query
+        name: show_hidden
+        required: false
+        schema:
+          default: false
+          description: When set - list all branches including hidden branches. *EXPERIMENTAL*
+          type: boolean
         style: form
       responses:
         "200":
@@ -5643,6 +5660,74 @@ paths:
       tags:
       - objects
       x-accepts: application/json
+  /repositories/{repository}/branches/{branch}/objects/stat/user_metadata:
+    put:
+      operationId: updateObjectUserMetadata
+      parameters:
+      - explode: false
+        in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+        style: simple
+      - description: branch to update
+        explode: false
+        in: path
+        name: branch
+        required: true
+        schema:
+          type: string
+        style: simple
+      - description: path to object relative to the branch
+        explode: true
+        in: query
+        name: path
+        required: true
+        schema:
+          type: string
+        style: form
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateObjectUserMetadata'
+        required: true
+      responses:
+        "201":
+          description: User metadata updated
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Resource Not Found
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        "420":
+          description: too many requests
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Server Error
+      summary: rewrite (all) object metadata
+      tags:
+      - objects
+      - experimental
+      x-content-type: application/json
+      x-accepts: application/json
   /repositories/{repository}/refs/{ref}/objects/underlyingProperties:
     get:
       operationId: getUnderlyingProperties
@@ -6747,6 +6832,355 @@ paths:
       - internal
       x-content-type: application/json
       x-accepts: application/json
+  /repositories/{repository}/pulls:
+    get:
+      operationId: listPullRequests
+      parameters:
+      - explode: false
+        in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+        style: simple
+      - description: return items prefixed with this value
+        explode: true
+        in: query
+        name: prefix
+        required: false
+        schema:
+          type: string
+        style: form
+      - description: return items after this value
+        explode: true
+        in: query
+        name: after
+        required: false
+        schema:
+          type: string
+        style: form
+      - description: how many items to return
+        explode: true
+        in: query
+        name: amount
+        required: false
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: -1
+          type: integer
+        style: form
+      - explode: true
+        in: query
+        name: status
+        required: false
+        schema:
+          default: all
+          description: filter pull requests by status
+          enum:
+          - open
+          - closed
+          - all
+          type: string
+        style: form
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PullRequestsList'
+          description: list of pull requests
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Resource Not Found
+        "420":
+          description: too many requests
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Server Error
+      summary: list pull requests
+      tags:
+      - pulls
+      - experimental
+      x-accepts: application/json
+    post:
+      operationId: createPullRequest
+      parameters:
+      - explode: false
+        in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PullRequestCreation'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PullRequestCreationResponse'
+          description: pull request created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Validation Error
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Resource Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Resource Conflicts With Target
+        "420":
+          description: too many requests
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Server Error
+      summary: create pull request
+      tags:
+      - pulls
+      - experimental
+      x-content-type: application/json
+      x-accepts: application/json
+  /repositories/{repository}/pulls/{pull_request}:
+    get:
+      operationId: getPullRequest
+      parameters:
+      - explode: false
+        in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+        style: simple
+      - description: pull request id
+        explode: false
+        in: path
+        name: pull_request
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PullRequest'
+          description: pull request
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Validation Error
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Resource Not Found
+        "420":
+          description: too many requests
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Server Error
+      summary: get pull request
+      tags:
+      - pulls
+      - experimental
+      x-accepts: application/json
+    patch:
+      operationId: updatePullRequest
+      parameters:
+      - explode: false
+        in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+        style: simple
+      - description: pull request id
+        explode: false
+        in: path
+        name: pull_request
+        required: true
+        schema:
+          type: string
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PullRequestBasic'
+        required: true
+      responses:
+        "200":
+          description: pull request updated successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Validation Error
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Resource Not Found
+        "420":
+          description: too many requests
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Server Error
+      summary: update pull request
+      tags:
+      - pulls
+      - experimental
+      x-content-type: application/json
+      x-accepts: application/json
+  /repositories/{repository}/pulls/{pull_request}/merge:
+    put:
+      operationId: mergePullRequest
+      parameters:
+      - explode: false
+        in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+        style: simple
+      - description: pull request id
+        explode: false
+        in: path
+        name: pull_request
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeResult'
+          description: merge completed
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Validation Error
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Resource Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeResult'
+          description: |
+            Conflict
+            Deprecated: content schema will return Error format and not an empty MergeResult
+        "412":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: precondition failed (e.g. a pre-merge hook returned a failure)
+        "420":
+          description: too many requests
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Server Error
+      summary: merge pull request
+      tags:
+      - pulls
+      - experimental
+      x-accepts: application/json
   /healthcheck:
     get:
       description: check that the API server is up and running
@@ -6961,6 +7395,15 @@ components:
       schema:
         type: string
       style: form
+    SearchString:
+      description: string for searching relevant entries
+      explode: true
+      in: query
+      name: search
+      required: false
+      schema:
+        type: string
+      style: form
     IfNoneMatch:
       description: Set to "*" to atomically allow the upload only if the key has no
         object yet. Other values are not supported.
@@ -7058,6 +7501,7 @@ components:
     Repository:
       example:
         read_only: true
+        storage_id: storage_id
         default_branch: default_branch
         id: id
         creation_date: 0
@@ -7070,6 +7514,9 @@ components:
           format: int64
           type: integer
         default_branch:
+          type: string
+        storage_id:
+          description: Unique identifier of the underlying data store. *EXPERIMENTAL*
           type: string
         storage_namespace:
           description: Filesystem URI to store the underlying data in (e.g. "s3://my-bucket/some/path/")
@@ -7123,11 +7570,13 @@ components:
           results: 0
         results:
         - read_only: true
+          storage_id: storage_id
           default_branch: default_branch
           id: id
           creation_date: 0
           storage_namespace: storage_namespace
         - read_only: true
+          storage_id: storage_id
           default_branch: default_branch
           id: id
           creation_date: 0
@@ -7176,12 +7625,16 @@ components:
       example:
         sample_data: true
         read_only: true
+        storage_id: storage_id
         name: name
         default_branch: main
         storage_namespace: s3://example-bucket/
       properties:
         name:
           pattern: "^[a-z0-9][a-z0-9-]{2,62}$"
+          type: string
+        storage_id:
+          description: Unique identifier of the underlying data store. *EXPERIMENTAL*
           type: string
         storage_namespace:
           description: Filesystem URI to store the underlying data in (e.g. "s3://my-bucket/some/path/")
@@ -7256,6 +7709,10 @@ components:
         checksum:
           type: string
         size_bytes:
+          description: |
+            The number of bytes in the object.  lakeFS always populates this
+            field when returning ObjectStats.  This field is optional _for
+            the client_ to supply, for instance on upload.
           format: int64
           type: integer
         mtime:
@@ -7314,6 +7771,18 @@ components:
       required:
       - pagination
       - results
+      type: object
+    UpdateObjectUserMetadata:
+      example:
+        set:
+          key: set
+      properties:
+        set:
+          additionalProperties:
+            type: string
+          type: object
+      required:
+      - set
       type: object
     ObjectCopyCreation:
       example:
@@ -7497,8 +7966,27 @@ components:
       required:
       - type
       type: object
+    CommitOverrides:
+      example:
+        metadata:
+          key: metadata
+        message: message
+      properties:
+        message:
+          description: replace the commit message
+          type: string
+        metadata:
+          additionalProperties:
+            type: string
+          description: replace the metadata of the commit
+          type: object
+      type: object
     RevertCreation:
       example:
+        commit_overrides:
+          metadata:
+            key: metadata
+          message: message
         ref: ref
         parent_number: 0
         force: false
@@ -7507,6 +7995,8 @@ components:
         ref:
           description: "the commit to revert, given by a ref"
           type: string
+        commit_overrides:
+          $ref: '#/components/schemas/CommitOverrides'
         parent_number:
           description: "when reverting a merge commit, the parent number (starting\
             \ from 1) relative to which to perform the revert."
@@ -7524,6 +8014,10 @@ components:
       type: object
     CherryPickCreation:
       example:
+        commit_overrides:
+          metadata:
+            key: metadata
+          message: message
         ref: ref
         parent_number: 0
         force: false
@@ -7536,6 +8030,8 @@ components:
             When cherry-picking a merge commit, the parent number (starting from 1) with which to perform the diff.
             The default branch is parent 1.
           type: integer
+        commit_overrides:
+          $ref: '#/components/schemas/CommitOverrides'
         force:
           default: false
           type: boolean
@@ -7733,9 +8229,11 @@ components:
       example:
         metadata:
           key: metadata
+        squash_merge: false
         force: false
         message: message
         strategy: strategy
+        allow_empty: false
       properties:
         message:
           type: string
@@ -7751,10 +8249,26 @@ components:
           type: string
         force:
           default: false
+          description: Allow merge into a read-only branch or into a branch with the
+            same content
+          type: boolean
+        allow_empty:
+          default: false
+          description: Allow merge when the branches have the same content
+          type: boolean
+        squash_merge:
+          default: false
+          description: |
+            If set, set only the destination branch as a parent, which "squashes" the merge to
+            appear as a single commit on the destination branch.  The source commit is no longer
+            a part of the merge commit; consider adding it to the 'metadata' or 'message'
+            fields.  This behaves like a GitHub or GitLab "squash merge", or in Git terms 'git
+            merge --squash; git commit ...'.
           type: boolean
       type: object
     BranchCreation:
       example:
+        hidden: false
         name: name
         force: false
         source: source
@@ -7765,6 +8279,11 @@ components:
           type: string
         force:
           default: false
+          type: boolean
+        hidden:
+          default: false
+          description: "When set, branch will not show up when listing branches by\
+            \ default. *EXPERIMENTAL*"
           type: boolean
       required:
       - name
@@ -8013,10 +8532,12 @@ components:
       type: object
     LoginConfig:
       example:
+        username_ui_placeholder: username_ui_placeholder
         login_failed_message: login_failed_message
         logout_url: logout_url
         login_url: login_url
-        RBAC: simplified
+        RBAC: none
+        password_ui_placeholder: password_ui_placeholder
         fallback_login_url: fallback_login_url
         login_cookie_names:
         - login_cookie_names
@@ -8028,8 +8549,17 @@ components:
             RBAC will remain enabled on GUI if "external".  That only works
             with an external auth service.
           enum:
+          - none
           - simplified
           - external
+          type: string
+        username_ui_placeholder:
+          description: |
+            Placeholder text to display in the username field of the login form.
+          type: string
+        password_ui_placeholder:
+          description: |
+            Placeholder text to display in the password field of the login form.
           type: string
         login_url:
           description: primary URL to use for login.
@@ -8061,10 +8591,12 @@ components:
     SetupState:
       example:
         login_config:
+          username_ui_placeholder: username_ui_placeholder
           login_failed_message: login_failed_message
           logout_url: logout_url
           login_url: login_url
-          RBAC: simplified
+          RBAC: none
+          password_ui_placeholder: password_ui_placeholder
           fallback_login_url: fallback_login_url
           login_cookie_names:
           - login_cookie_names
@@ -8197,12 +8729,15 @@ components:
     Group:
       example:
         name: name
+        description: description
         id: id
         creation_date: 0
       properties:
         id:
           type: string
         name:
+          type: string
+        description:
           type: string
         creation_date:
           description: Unix Epoch in seconds
@@ -8221,9 +8756,11 @@ components:
           results: 0
         results:
         - name: name
+          description: description
           id: id
           creation_date: 0
         - name: name
+          description: description
           id: id
           creation_date: 0
       properties:
@@ -8340,9 +8877,12 @@ components:
       type: object
     GroupCreation:
       example:
+        description: description
         id: id
       properties:
         id:
+          type: string
+        description:
           type: string
       required:
       - id
@@ -8462,14 +9002,19 @@ components:
       type: object
     StorageConfig:
       example:
+        backward_compatible: false
+        blockstore_extras:
+          key: blockstore_extras
+        pre_sign_support_ui: true
+        import_support: true
+        default_namespace_prefix: default_namespace_prefix
+        blockstore_description: blockstore_description
         pre_sign_multipart_upload: true
         blockstore_namespace_example: blockstore_namespace_example
         blockstore_namespace_ValidityRegex: blockstore_namespace_ValidityRegex
+        blockstore_id: blockstore_id
         blockstore_type: blockstore_type
-        pre_sign_support_ui: true
-        import_support: true
         import_validity_regex: import_validity_regex
-        default_namespace_prefix: default_namespace_prefix
         pre_sign_support: true
       properties:
         blockstore_type:
@@ -8490,6 +9035,18 @@ components:
           type: string
         pre_sign_multipart_upload:
           type: boolean
+        blockstore_id:
+          type: string
+        blockstore_description:
+          type: string
+        backward_compatible:
+          default: false
+          type: boolean
+        blockstore_extras:
+          additionalProperties:
+            type: string
+          description: blockstore specific properties
+          type: object
       required:
       - blockstore_namespace_ValidityRegex
       - blockstore_namespace_example
@@ -8499,17 +9056,55 @@ components:
       - pre_sign_support
       - pre_sign_support_ui
       type: object
+    StorageConfigList:
+      items:
+        $ref: '#/components/schemas/StorageConfig'
+      type: array
     Config:
       example:
-        storage_config:
+        storage_config_list:
+        - backward_compatible: false
+          blockstore_extras:
+            key: blockstore_extras
+          pre_sign_support_ui: true
+          import_support: true
+          default_namespace_prefix: default_namespace_prefix
+          blockstore_description: blockstore_description
           pre_sign_multipart_upload: true
           blockstore_namespace_example: blockstore_namespace_example
           blockstore_namespace_ValidityRegex: blockstore_namespace_ValidityRegex
+          blockstore_id: blockstore_id
           blockstore_type: blockstore_type
+          import_validity_regex: import_validity_regex
+          pre_sign_support: true
+        - backward_compatible: false
+          blockstore_extras:
+            key: blockstore_extras
           pre_sign_support_ui: true
           import_support: true
-          import_validity_regex: import_validity_regex
           default_namespace_prefix: default_namespace_prefix
+          blockstore_description: blockstore_description
+          pre_sign_multipart_upload: true
+          blockstore_namespace_example: blockstore_namespace_example
+          blockstore_namespace_ValidityRegex: blockstore_namespace_ValidityRegex
+          blockstore_id: blockstore_id
+          blockstore_type: blockstore_type
+          import_validity_regex: import_validity_regex
+          pre_sign_support: true
+        storage_config:
+          backward_compatible: false
+          blockstore_extras:
+            key: blockstore_extras
+          pre_sign_support_ui: true
+          import_support: true
+          default_namespace_prefix: default_namespace_prefix
+          blockstore_description: blockstore_description
+          pre_sign_multipart_upload: true
+          blockstore_namespace_example: blockstore_namespace_example
+          blockstore_namespace_ValidityRegex: blockstore_namespace_ValidityRegex
+          blockstore_id: blockstore_id
+          blockstore_type: blockstore_type
+          import_validity_regex: import_validity_regex
           pre_sign_support: true
         version_config:
           latest_version: latest_version
@@ -8521,6 +9116,10 @@ components:
           $ref: '#/components/schemas/VersionConfig'
         storage_config:
           $ref: '#/components/schemas/StorageConfig'
+        storage_config_list:
+          items:
+            $ref: '#/components/schemas/StorageConfig'
+          type: array
       type: object
     VersionConfig:
       example:
@@ -8715,6 +9314,7 @@ components:
         content_type: content_type
         checksum: checksum
         force: false
+        mtime: 6
         staging:
           physical_address: physical_address
           presigned_url: presigned_url
@@ -8736,6 +9336,10 @@ components:
         content_type:
           description: Object media type
           type: string
+        mtime:
+          description: Unix Epoch in seconds.  May be ignored by server.
+          format: int64
+          type: integer
         force:
           default: false
           type: boolean
@@ -9208,6 +9812,106 @@ components:
       required:
       - id
       - user_id
+      type: object
+    PullRequestBasic:
+      example:
+        description: description
+        title: title
+        status: open
+      properties:
+        status:
+          enum:
+          - open
+          - closed
+          - merged
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+      type: object
+    PullRequest:
+      allOf:
+      - $ref: '#/components/schemas/PullRequestBasic'
+      - required:
+        - description
+        - status
+        - title
+      - properties:
+          id:
+            type: string
+          creation_date:
+            format: date-time
+            type: string
+          author:
+            type: string
+          source_branch:
+            type: string
+          destination_branch:
+            type: string
+          merged_commit_id:
+            description: the commit id of merged PRs
+            type: string
+          closed_date:
+            format: date-time
+            type: string
+        required:
+        - author
+        - creation_date
+        - destination_branch
+        - id
+        - source_branch
+        type: object
+    PullRequestsList:
+      example:
+        pagination:
+          max_per_page: 0
+          has_more: true
+          next_offset: next_offset
+          results: 0
+        results:
+        - null
+        - null
+      properties:
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        results:
+          items:
+            $ref: '#/components/schemas/PullRequest'
+          type: array
+      required:
+      - pagination
+      - results
+      type: object
+    PullRequestCreation:
+      example:
+        destination_branch: destination_branch
+        description: description
+        title: title
+        source_branch: source_branch
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        source_branch:
+          type: string
+        destination_branch:
+          type: string
+      required:
+      - destination_branch
+      - source_branch
+      - title
+      type: object
+    PullRequestCreationResponse:
+      example:
+        id: id
+      properties:
+        id:
+          description: ID of the pull request
+          type: string
+      required:
+      - id
       type: object
     uploadObject_request:
       properties:

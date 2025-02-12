@@ -3,6 +3,7 @@ package factory
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"cloud.google.com/go/storage"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -14,6 +15,7 @@ import (
 	"github.com/treeverse/lakefs/pkg/block/params"
 	s3a "github.com/treeverse/lakefs/pkg/block/s3"
 	"github.com/treeverse/lakefs/pkg/block/transient"
+	"github.com/treeverse/lakefs/pkg/config"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/stats"
 	"golang.org/x/oauth2/google"
@@ -25,8 +27,8 @@ const (
 	googleAuthCloudPlatform = "https://www.googleapis.com/auth/cloud-platform"
 )
 
-func BuildBlockAdapter(ctx context.Context, statsCollector stats.Collector, c params.AdapterConfig) (block.Adapter, error) {
-	blockstore := c.BlockstoreType()
+func BuildBlockAdapter(ctx context.Context, statsCollector stats.Collector, c config.AdapterConfig) (block.Adapter, error) {
+	blockstore := strings.ToLower(c.BlockstoreType())
 	logging.FromContext(ctx).
 		WithField("type", blockstore).
 		Info("initialize blockstore adapter")
@@ -105,6 +107,9 @@ func buildS3Adapter(ctx context.Context, statsCollector stats.Collector, params 
 	if params.ServerSideEncryptionKmsKeyID != "" {
 		opts = append(opts, s3a.WithServerSideEncryptionKmsKeyID(params.ServerSideEncryptionKmsKeyID))
 	}
+	if params.PreSignedEndpoint != "" {
+		opts = append(opts, s3a.WithPreSignedEndpoint(params.PreSignedEndpoint))
+	}
 	adapter, err := s3a.NewAdapter(ctx, params, opts...)
 	if err != nil {
 		return nil, err
@@ -132,11 +137,18 @@ func buildGSAdapter(ctx context.Context, params params.GS) (*gs.Adapter, error) 
 	if err != nil {
 		return nil, err
 	}
-	adapter := gs.NewAdapter(client,
+	opts := []gs.AdapterOption{
 		gs.WithPreSignedExpiry(params.PreSignedExpiry),
 		gs.WithDisablePreSigned(params.DisablePreSigned),
 		gs.WithDisablePreSignedUI(params.DisablePreSignedUI),
-	)
+	}
+	switch {
+	case params.ServerSideEncryptionCustomerSupplied != nil:
+		opts = append(opts, gs.WithServerSideEncryptionCustomerSupplied(params.ServerSideEncryptionCustomerSupplied))
+	case params.ServerSideEncryptionKmsKeyID != "":
+		opts = append(opts, gs.WithServerSideEncryptionKmsKeyID(params.ServerSideEncryptionKmsKeyID))
+	}
+	adapter := gs.NewAdapter(client, opts...)
 	logging.FromContext(ctx).WithField("type", "gs").Info("initialized blockstore adapter")
 	return adapter, nil
 }

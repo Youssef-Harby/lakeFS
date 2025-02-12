@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-openapi/swag"
 	"github.com/rs/xid"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
@@ -74,10 +75,10 @@ func makeRepositoryName(name string) string {
 func setupTest(t testing.TB) (context.Context, logging.Logger, string) {
 	ctx := context.Background()
 	name := makeRepositoryName(t.Name())
-	logger := logger.WithField("testName", name)
+	log := logger.WithField("testName", name)
 	repo := createRepositoryForTest(ctx, t)
-	logger.WithField("repo", repo).Info("Created repository")
-	return ctx, logger, repo
+	log.WithField("repo", repo).Info("Created repository")
+	return ctx, log, repo
 }
 
 func tearDownTest(repoName string) {
@@ -93,7 +94,14 @@ func createRepositoryForTest(ctx context.Context, t testing.TB) string {
 func createRepositoryByName(ctx context.Context, t testing.TB, name string) string {
 	storageNamespace := generateUniqueStorageNamespace(name)
 	name = makeRepositoryName(name)
-	createRepository(ctx, t, name, storageNamespace)
+	createRepository(ctx, t, name, storageNamespace, false)
+	return name
+}
+
+func createReadOnlyRepositoryByName(ctx context.Context, t testing.TB, name string) string {
+	storageNamespace := generateUniqueStorageNamespace(name)
+	name = makeRepositoryName(name)
+	createRepository(ctx, t, name, storageNamespace, true)
 	return name
 }
 
@@ -114,7 +122,7 @@ func generateUniqueStorageNamespace(repoName string) string {
 	return ns + xid.New().String() + "/" + repoName
 }
 
-func createRepository(ctx context.Context, t testing.TB, name string, repoStorage string) {
+func createRepository(ctx context.Context, t testing.TB, name string, repoStorage string, isReadOnly bool) {
 	logger.WithFields(logging.Fields{
 		"repository":        name,
 		"storage_namespace": repoStorage,
@@ -124,6 +132,7 @@ func createRepository(ctx context.Context, t testing.TB, name string, repoStorag
 		DefaultBranch:    apiutil.Ptr(mainBranch),
 		Name:             name,
 		StorageNamespace: repoStorage,
+		ReadOnly:         &isReadOnly,
 	})
 	require.NoErrorf(t, err, "failed to create repository '%s', storage '%s'", name, repoStorage)
 	require.NoErrorf(t, verifyResponse(resp.HTTPResponse, resp.Body),
@@ -133,7 +142,7 @@ func createRepository(ctx context.Context, t testing.TB, name string, repoStorag
 func deleteRepositoryIfAskedTo(ctx context.Context, repositoryName string) {
 	deleteRepositories := viper.GetBool("delete_repositories")
 	if deleteRepositories {
-		resp, err := client.DeleteRepositoryWithResponse(ctx, repositoryName, &apigen.DeleteRepositoryParams{})
+		resp, err := client.DeleteRepositoryWithResponse(ctx, repositoryName, &apigen.DeleteRepositoryParams{Force: swag.Bool(true)})
 		if err != nil {
 			logger.WithError(err).WithField("repo", repositoryName).Error("Request to delete repository failed")
 		} else if resp.StatusCode() != http.StatusNoContent {
@@ -328,10 +337,41 @@ func listRepositories(t *testing.T, ctx context.Context) []apigen.Repository {
 	return listedRepos
 }
 
+// isBlockstoreType returns nil if the blockstore type is one of requiredTypes, or the actual
+// type of the blockstore.
+func isBlockstoreType(requiredTypes ...string) *string {
+	blockstoreType := viper.GetString(config.BlockstoreTypeKey)
+	if slices.Contains(requiredTypes, blockstoreType) {
+		return nil
+	}
+	return &blockstoreType
+}
+
 // requireBlockstoreType Skips test if blockstore type doesn't match the required type
 func requireBlockstoreType(t testing.TB, requiredTypes ...string) {
-	blockstoreType := viper.GetString(config.BlockstoreTypeKey)
-	if !slices.Contains(requiredTypes, blockstoreType) {
-		t.Skipf("Required blockstore types: %v, got: %s", requiredTypes, blockstoreType)
+	if blockstoreType := isBlockstoreType(requiredTypes...); blockstoreType != nil {
+		t.Skipf("Required blockstore types: %v, got: %s", requiredTypes, *blockstoreType)
 	}
+}
+
+func isBasicAuth(t testing.TB, ctx context.Context) bool {
+	t.Helper()
+	return getRBACState(t, ctx) == "none"
+}
+
+func isAdvancedAuth(t testing.TB, ctx context.Context) bool {
+	return slices.Contains([]string{"external", "internal"}, getRBACState(t, ctx))
+}
+
+func getRBACState(t testing.TB, ctx context.Context) string {
+	setupState := getServerConfig(t, ctx)
+	return swag.StringValue(setupState.LoginConfig.RBAC)
+}
+
+func getServerConfig(t testing.TB, ctx context.Context) *apigen.SetupState {
+	t.Helper()
+	resp, err := client.GetSetupStateWithResponse(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, resp.JSON200)
+	return resp.JSON200
 }

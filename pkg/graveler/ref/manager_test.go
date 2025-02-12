@@ -339,38 +339,57 @@ func TestManager_CreateBranch(t *testing.T) {
 	})
 	testutil.Must(t, err)
 
-	err = r.CreateBranch(ctx, repository, "f1", graveler.Branch{CommitID: "c1", StagingToken: "s1"})
-	testutil.MustDo(t, "create branch f1", err)
-
-	br, err := r.GetBranch(ctx, repository, "f1")
-	testutil.MustDo(t, "get f1 branch", err)
-	if br == nil {
-		t.Fatal("get branch got nil")
+	testCases := []struct {
+		Name   string
+		Hidden bool
+	}{
+		{
+			Name:   "not hidden",
+			Hidden: false,
+		},
+		{
+			Name:   "hidden",
+			Hidden: true,
+		},
 	}
-	if br.CommitID != "c1" {
-		t.Fatalf("unexpected commit for branch f1: %s - expected: c1", br.CommitID)
-	}
+	for _, tt := range testCases {
+		t.Run(tt.Name, func(t *testing.T) {
+			branchName := graveler.BranchID(tt.Name)
+			err = r.CreateBranch(ctx, repository, branchName, graveler.Branch{CommitID: "c1", StagingToken: "s1", Hidden: tt.Hidden})
+			testutil.MustDo(t, "create branch", err)
 
-	// check we can't create existing
-	err = r.CreateBranch(ctx, repository, "f1", graveler.Branch{CommitID: "c2", StagingToken: "s2"})
-	if !errors.Is(err, graveler.ErrBranchExists) {
-		t.Fatalf("CreateBranch() err = %s, expected already exists", err)
-	}
-	// overwrite by delete and create
-	err = r.DeleteBranch(ctx, repository, "f1")
-	testutil.MustDo(t, "delete branch f1", err)
+			br, err := r.GetBranch(ctx, repository, branchName)
+			testutil.MustDo(t, "get branch", err)
+			if br == nil {
+				t.Fatal("get branch got nil")
+			}
+			if br.CommitID != "c1" {
+				t.Fatalf("unexpected commit for branch: %s - expected: c1", br.CommitID)
+			}
+			require.Equal(t, tt.Hidden, br.Hidden)
 
-	err = r.CreateBranch(ctx, repository, "f1", graveler.Branch{CommitID: "c2", StagingToken: "s2"})
-	testutil.MustDo(t, "create branch f1", err)
+			// check we can't create existing
+			err = r.CreateBranch(ctx, repository, branchName, graveler.Branch{CommitID: "c2", StagingToken: "s2", Hidden: tt.Hidden})
+			if !errors.Is(err, graveler.ErrBranchExists) {
+				t.Fatalf("CreateBranch() err = %s, expected already exists", err)
+			}
+			// overwrite by delete and create
+			err = r.DeleteBranch(ctx, repository, branchName)
+			testutil.MustDo(t, "delete branch", err)
 
-	br, err = r.GetBranch(ctx, repository, "f1")
-	testutil.MustDo(t, "get f1 branch", err)
+			err = r.CreateBranch(ctx, repository, branchName, graveler.Branch{CommitID: "c2", StagingToken: "s2", Hidden: tt.Hidden})
+			testutil.MustDo(t, "create branch", err)
 
-	if br == nil {
-		t.Fatal("get branch got nil")
-	}
-	if br.CommitID != "c2" {
-		t.Fatalf("unexpected commit for branch f1: %s - expected: c2", br.CommitID)
+			br, err = r.GetBranch(ctx, repository, branchName)
+			testutil.MustDo(t, "get f1 branch", err)
+
+			if br == nil {
+				t.Fatal("get branch got nil")
+			}
+			if br.CommitID != "c2" {
+				t.Fatalf("unexpected commit for branch: %s - expected: c2", br.CommitID)
+			}
+		})
 	}
 }
 
@@ -512,13 +531,46 @@ func TestManager_ListBranches(t *testing.T) {
 	})
 	testutil.Must(t, err)
 
-	for _, b := range []graveler.BranchID{"a", "aa", "c", "b", "z", "f"} {
+	visibleBranches := []graveler.BranchID{"a", "ab", "ca", "ba", "za", "fa"}
+	hiddenBranches := []graveler.BranchID{"aa", "ac", "cb", "bb", "zb", "fb"}
+	allBranches := append(visibleBranches, hiddenBranches...)
+	for _, b := range visibleBranches {
 		testutil.Must(t, r.SetBranch(context.Background(), repository, b, graveler.Branch{
 			CommitID: "c2",
 		}))
 	}
+	for _, b := range hiddenBranches {
+		testutil.Must(t, r.SetBranch(context.Background(), repository, b, graveler.Branch{
+			CommitID: "c2",
+			Hidden:   true,
+		}))
+	}
 
-	iter, err := r.ListBranches(context.Background(), repository)
+	// List only visible branches
+	iter, err := r.ListBranches(context.Background(), repository, graveler.ListOptions{ShowHidden: false})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer iter.Close()
+
+	var bvs []graveler.BranchID
+	for iter.Next() {
+		b := iter.Value()
+		bvs = append(bvs, b.BranchID)
+	}
+	if iter.Err() != nil {
+		t.Fatalf("unexpected error: %v", iter.Err())
+	}
+	visibleBranches = append(visibleBranches, "main")
+	sort.Slice(visibleBranches, func(i, j int) bool {
+		return visibleBranches[i] < visibleBranches[j]
+	})
+	if !reflect.DeepEqual(bvs, visibleBranches) {
+		t.Fatalf("unexpected branch list: %v", bvs)
+	}
+
+	// List all branches
+	iter, err = r.ListBranches(context.Background(), repository, graveler.ListOptions{ShowHidden: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -532,7 +584,11 @@ func TestManager_ListBranches(t *testing.T) {
 	if iter.Err() != nil {
 		t.Fatalf("unexpected error: %v", iter.Err())
 	}
-	if !reflect.DeepEqual(bs, []graveler.BranchID{"a", "aa", "b", "c", "f", "main", "z"}) {
+	allBranches = append(allBranches, "main")
+	sort.Slice(allBranches, func(i, j int) bool {
+		return allBranches[i] < allBranches[j]
+	})
+	if !reflect.DeepEqual(bs, allBranches) {
 		t.Fatalf("unexpected branch list: %v", bs)
 	}
 }
@@ -1225,4 +1281,139 @@ func TestManager_SetRepositoryMetadata(t *testing.T) {
 			require.Equal(t, tt.expectedMetadata, metadata)
 		})
 	}
+}
+
+func TestManager_GetPullRequest(t *testing.T) {
+	r, store := testRefManager(t)
+	repository, err := r.CreateRepository(context.Background(), "repo1", graveler.Repository{
+		StorageNamespace: "s3://",
+		CreationDate:     time.Now(),
+		DefaultBranchID:  "main",
+	})
+	testutil.Must(t, err)
+	ctx := context.Background()
+
+	t.Run("get_pull_request_exists", func(t *testing.T) {
+		mergeCommitID := "abc"
+		expected := graveler.PullRequestRecord{
+			ID: "pullID",
+			PullRequest: graveler.PullRequest{
+				CreationDate:   time.Now().UTC(),
+				Status:         graveler.PullRequestStatus_CLOSED,
+				Title:          "some title",
+				Author:         "some author",
+				Description:    "some description",
+				Source:         "dev",
+				Destination:    "main",
+				MergedCommitID: &mergeCommitID,
+			},
+		}
+		require.NoError(t, r.CreatePullRequest(ctx, repository, expected.ID, &expected.PullRequest))
+
+		// Verify secondary index
+		data, err := store.Get(ctx, []byte(ref.PullsPartitionKey), []byte(ref.PullBySrcDstPath(repository, expected.Source, expected.Destination)))
+		require.NoError(t, err)
+		sec := kv.SecondaryIndex{}
+		require.NoError(t, proto.Unmarshal(data.Value, &sec))
+		require.Equal(t, expected.ID.String(), string(sec.PrimaryKey))
+
+		// Verify we can get pull from secondary index
+		pull, err := r.GetPullRequest(ctx, repository, graveler.PullRequestID(sec.PrimaryKey))
+		require.NoError(t, err)
+		require.Equal(t, expected.PullRequest, *pull)
+	})
+
+	t.Run("get_pull_request_doesnt_exists", func(t *testing.T) {
+		_, err := r.GetPullRequest(ctx, repository, "pull2")
+		require.ErrorIs(t, err, graveler.ErrPullRequestNotFound)
+	})
+}
+
+func TestManager_DeletePullRequest(t *testing.T) {
+	r, store := testRefManager(t)
+	repository, err := r.CreateRepository(context.Background(), "repo1", graveler.Repository{
+		StorageNamespace: "s3://",
+		CreationDate:     time.Now(),
+		DefaultBranchID:  "main",
+	})
+	testutil.Must(t, err)
+	ctx := context.Background()
+
+	t.Run("delete_pull_request_exists", func(t *testing.T) {
+		rec := graveler.PullRequestRecord{
+			ID: "",
+			PullRequest: graveler.PullRequest{
+				CreationDate:   time.Now().UTC(),
+				Status:         graveler.PullRequestStatus_CLOSED,
+				Title:          "some title",
+				Author:         "some author",
+				Description:    "some description",
+				Source:         "dev",
+				Destination:    "main",
+				MergedCommitID: nil,
+			},
+		}
+		require.NoError(t, r.CreatePullRequest(ctx, repository, rec.ID, &rec.PullRequest))
+
+		// Delete Pull request
+		err := r.DeletePullRequest(ctx, repository, rec.ID)
+		require.NoError(t, err)
+
+		// Verify secondary index deleted
+		_, err = store.Get(ctx, []byte(ref.PullsPartitionKey), []byte(ref.PullBySrcDstPath(repository, rec.Source, rec.Destination)))
+		require.ErrorIs(t, err, kv.ErrNotFound)
+	})
+
+	t.Run("delete_pull_request_doesnt_exists", func(t *testing.T) {
+		// No error expected if key not found
+		require.NoError(t, r.DeletePullRequest(ctx, repository, "pull2"))
+	})
+}
+
+func TestManager_UpdatePullRequest(t *testing.T) {
+	r, _ := testRefManager(t)
+	repository, err := r.CreateRepository(context.Background(), "repo1", graveler.Repository{
+		StorageNamespace: "s3://",
+		CreationDate:     time.Now(),
+		DefaultBranchID:  "main",
+	})
+	testutil.Must(t, err)
+	ctx := context.Background()
+	expected := graveler.PullRequestRecord{
+		ID: "",
+		PullRequest: graveler.PullRequest{
+			CreationDate:   time.Now().UTC(),
+			Status:         graveler.PullRequestStatus_CLOSED,
+			Title:          "some title",
+			Author:         "some author",
+			Description:    "some description",
+			Source:         "dev",
+			Destination:    "main",
+			MergedCommitID: nil,
+		},
+	}
+
+	t.Run("update_pull_request_exists", func(t *testing.T) {
+		require.NoError(t, r.CreatePullRequest(ctx, repository, expected.ID, &expected.PullRequest))
+
+		err := r.UpdatePullRequest(ctx, repository, expected.ID, func(request *graveler.PullRequest) (*graveler.PullRequest, error) {
+			// Modify pull
+			expected.Title = "foo"
+			expected.Description = "bar"
+			expected.Destination = "abc"
+			return &expected.PullRequest, nil
+		})
+		require.NoError(t, err)
+		pull, err := r.GetPullRequest(ctx, repository, expected.ID)
+		require.NoError(t, err)
+		require.Equal(t, expected.PullRequest, *pull)
+	})
+
+	t.Run("update_pull_request_doesnt_exists", func(t *testing.T) {
+		// No error expected if key not found
+		require.ErrorIs(t, r.UpdatePullRequest(ctx, repository, "pull2", func(request *graveler.PullRequest) (*graveler.PullRequest, error) {
+			t.Fatalf("Should not reach")
+			return nil, nil
+		}), graveler.ErrPullRequestNotFound)
+	})
 }

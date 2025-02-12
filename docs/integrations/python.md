@@ -12,6 +12,10 @@ redirect_from:
 
 {% include toc_2-3.html %}
 
+{: .warning }
+> If you are still using the [legacy Python `lakefs-client`][legacy-pypi], it's
+> time to upgrade!  This client is [deprecated][legacy-deprecated] and will be removed
+> soon.
 
 **High Level Python SDK**  <span class="badge mr-1">New</span>
 We've just released a new High Level Python SDK library, and we're super excited to tell you about it! Continue reading to get the
@@ -19,7 +23,7 @@ full story!
 Though our previous SDK client is still supported and maintained, we highly recommend using the new High Level SDK.
 **For previous Python SDKs follow these links:**
 [lakefs-sdk](https://pydocs-sdk.lakefs.io)
-[legacy-sdk](https://pydocs.lakefs.io) (Depracated)
+[legacy-sdk](https://pydocs.lakefs.io) (Deprecated)
 {: .note }
 
 There are three primary ways to work with lakeFS from Python:
@@ -47,6 +51,9 @@ When working in an environment where **lakectl** is configured it is not necessa
 In case no authentication parameters exist, it is also possible to explicitly create a lakeFS client
 
 Here's how to instantiate a client:
+
+{: .note }
+See [here](../security/external-principals-aws.md#login-with-python) for instructions on how to log in with Python using your AWS role. This is applicable for enterprise users.
 
 ```python
 from lakefs.client import Client
@@ -156,10 +163,10 @@ Listing repositories:
 ```python
 import lakefs
 
-branch1 = lakefs.repository("example-repo").branch("experiment1").create(source_reference_id="main")
+branch1 = lakefs.repository("example-repo").branch("experiment1").create(source_reference="main")
 print("experiment1 ref:", branch1.get_commit().id)
 
-branch1 = lakefs.repository("example-repo").branch("experiment2").create(source_reference_id="main")
+branch1 = lakefs.repository("example-repo").branch("experiment2").create(source_reference="main")
 print("experiment2 ref:", branch2.get_commit().id)
 ```
 
@@ -601,3 +608,6 @@ s3.head_object(Bucket='example-repo', Key='main/example-file.parquet')
 # 'ETag': '"2398bc5880e535c61f7624ad6f138d62"',
 # 'Metadata': {}}
 ```
+
+[legacy-deprecated]:  /posts/deprecate-py-legacy.html
+[legacy-pypi]:  https://pypi.org/project/lakefs-client/

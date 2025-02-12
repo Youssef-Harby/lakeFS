@@ -65,11 +65,8 @@ var localCloneCmd = &cobra.Command{
 				}
 
 				for _, o := range listResp.JSON200.Results {
-					relPath := strings.TrimPrefix(o.Path, remotePath)
-					relPath = strings.TrimPrefix(relPath, uri.PathSeparator)
-
-					// skip directory markers
-					if relPath == "" || strings.HasSuffix(relPath, uri.PathSeparator) {
+					relPath := strings.TrimPrefix(strings.TrimPrefix(o.Path, remotePath), uri.PathSeparator)
+					if relPath == "" {
 						continue
 					}
 					ch <- &local.Change{
@@ -89,7 +86,13 @@ var localCloneCmd = &cobra.Command{
 			DieErr(err)
 		}
 		sigCtx := localHandleSyncInterrupt(ctx, idx, string(cloneOperation))
-		s := local.NewSyncManager(sigCtx, client, syncFlags)
+		s := local.NewSyncManager(sigCtx, client, getHTTPClient(), local.Config{
+			SyncFlags:           syncFlags,
+			SkipNonRegularFiles: cfg.Local.SkipNonRegularFiles,
+			IncludePerm:         cfg.Experimental.Local.POSIXPerm.Enabled,
+			IncludeUID:          cfg.Experimental.Local.POSIXPerm.IncludeUID,
+			IncludeGID:          cfg.Experimental.Local.POSIXPerm.IncludeGID,
+		})
 		err = s.Sync(localPath, stableRemote, ch)
 		if err != nil {
 			DieErr(err)

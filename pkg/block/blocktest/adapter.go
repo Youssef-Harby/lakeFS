@@ -1,7 +1,6 @@
 package blocktest
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,340 +8,37 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/go-test/deep"
 	"github.com/stretchr/testify/require"
-	"github.com/thanhpk/randstr"
 	"github.com/treeverse/lakefs/pkg/block"
-	"github.com/treeverse/lakefs/pkg/ingest/store"
 )
 
-func AdapterTest(t *testing.T, adapter block.Adapter, storageNamespace, externalPath string) {
-	t.Run("Adapter_PutGet", func(t *testing.T) { testAdapterPutGet(t, adapter, storageNamespace, externalPath) })
-	t.Run("Adapter_Copy", func(t *testing.T) { testAdapterCopy(t, adapter, storageNamespace) })
-	t.Run("Adapter_Remove", func(t *testing.T) { testAdapterRemove(t, adapter, storageNamespace) })
-	t.Run("Adapter_MultipartUpload", func(t *testing.T) { testAdapterMultipartUpload(t, adapter, storageNamespace) })
-	t.Run("Adapter_Exists", func(t *testing.T) { testAdapterExists(t, adapter, storageNamespace) })
+// AdapterTest Test suite of basic adapter functionality
+func AdapterTest(t *testing.T, adapter block.Adapter, storageNamespace, externalPath string, presigned bool) {
+	AdapterBasicObjectTest(t, adapter, storageNamespace, externalPath)
+	AdapterMultipartTest(t, adapter, storageNamespace, externalPath)
 	t.Run("Adapter_GetRange", func(t *testing.T) { testAdapterGetRange(t, adapter, storageNamespace) })
 	t.Run("Adapter_Walker", func(t *testing.T) { testAdapterWalker(t, adapter, storageNamespace) })
-}
-
-func testAdapterPutGet(t *testing.T, adapter block.Adapter, storageNamespace, externalPath string) {
-	ctx := context.Background()
-	const contents = "test_file"
-	size := int64(len(contents))
-
-	cases := []struct {
-		name           string
-		identifierType block.IdentifierType
-		path           string
-	}{
-		{"identifier_relative", block.IdentifierTypeRelative, "test_file"},
-		{"identifier_full", block.IdentifierTypeFull, externalPath + "/" + "test_file"},
-		{"identifier_unknown_relative", block.IdentifierTypeUnknownDeprecated, "test_file"},                  //nolint:staticcheck
-		{"identifier_unknown_full", block.IdentifierTypeUnknownDeprecated, externalPath + "/" + "test_file"}, //nolint:staticcheck
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			obj := block.ObjectPointer{
-				StorageNamespace: storageNamespace,
-				Identifier:       c.path,
-				IdentifierType:   c.identifierType,
-			}
-
-			err := adapter.Put(ctx, obj, size, strings.NewReader(contents), block.PutOpts{})
-			require.NoError(t, err)
-
-			reader, err := adapter.Get(ctx, obj)
-			require.NoError(t, err)
-			defer func() {
-				require.NoError(t, reader.Close())
-			}()
-			got, err := io.ReadAll(reader)
-			require.NoError(t, err)
-			require.Equal(t, contents, string(got))
-		})
+	if presigned {
+		t.Run("Adapter_GetPreSignedURL", func(t *testing.T) { testGetPreSignedURL(t, adapter, storageNamespace) })
 	}
 }
 
-func testAdapterCopy(t *testing.T, adapter block.Adapter, storageNamespace string) {
-	ctx := context.Background()
-	contents := "foo bar baz quux"
-	src := block.ObjectPointer{
-		StorageNamespace: storageNamespace,
-		Identifier:       "src",
-		IdentifierType:   block.IdentifierTypeRelative,
-	}
-	dst := block.ObjectPointer{
-		StorageNamespace: storageNamespace,
-		Identifier:       "export/to/dst",
-		IdentifierType:   block.IdentifierTypeRelative,
-	}
-
-	require.NoError(t, adapter.Put(ctx, src, int64(len(contents)), strings.NewReader(contents), block.PutOpts{}))
-
-	require.NoError(t, adapter.Copy(ctx, src, dst))
-	reader, err := adapter.Get(ctx, dst)
-	require.NoError(t, err)
-	got, err := io.ReadAll(reader)
-	require.NoError(t, err)
-	require.Equal(t, contents, string(got))
+func AdapterPresignedEndpointOverrideTest(t *testing.T, adapter block.Adapter, storageNamespace, externalPath string, oe *url.URL) {
+	AdapterBasicObjectTest(t, adapter, storageNamespace, externalPath)
+	t.Run("Adapter_GetPreSignedURLEndpointOverride", func(t *testing.T) { testGetPreSignedURLEndpointOverride(t, adapter, storageNamespace, oe) })
 }
 
-func testAdapterRemove(t *testing.T, adapter block.Adapter, storageNamespace string) {
-	ctx := context.Background()
-	const content = "Content used for testing"
-	tests := []struct {
-		name              string
-		additionalObjects []string
-		path              string
-		wantErr           bool
-		wantTree          []string
-	}{
-		{
-			name:     "test_single",
-			path:     "README",
-			wantErr:  false,
-			wantTree: []string{},
-		},
-
-		{
-			name:     "test_under_folder",
-			path:     "src/tools.go",
-			wantErr:  false,
-			wantTree: []string{},
-		},
-		{
-			name:     "test_under_multiple_folders",
-			path:     "a/b/c/d.txt",
-			wantErr:  false,
-			wantTree: []string{},
-		},
-		{
-			name:              "file_in_the_way",
-			path:              "a/b/c/d.txt",
-			additionalObjects: []string{"a/b/blocker.txt"},
-			wantErr:           false,
-			wantTree:          []string{"/a/b/blocker.txt"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// setup env
-			envObjects := tt.additionalObjects
-			envObjects = append(envObjects, tt.path)
-			for _, p := range envObjects {
-				obj := block.ObjectPointer{
-					StorageNamespace: storageNamespace,
-					Identifier:       tt.name + "/" + p,
-					IdentifierType:   block.IdentifierTypeRelative,
-				}
-				require.NoError(t, adapter.Put(ctx, obj, int64(len(content)), strings.NewReader(content), block.PutOpts{}))
-			}
-
-			// test Remove
-			obj := block.ObjectPointer{
-				StorageNamespace: storageNamespace,
-				Identifier:       tt.name + "/" + tt.path,
-				IdentifierType:   block.IdentifierTypeRelative,
-			}
-			if err := adapter.Remove(ctx, obj); (err != nil) != tt.wantErr {
-				t.Errorf("Remove() error = %v, wantErr %v", err, tt.wantErr)
-			}
-
-			qk, err := adapter.ResolveNamespace(storageNamespace, tt.name, block.IdentifierTypeRelative)
-			require.NoError(t, err)
-
-			tree := dumpPathTree(t, ctx, adapter, qk)
-			if diff := deep.Equal(tt.wantTree, tree); diff != nil {
-				t.Errorf("Remove() tree diff = %s", diff)
-			}
-		})
-	}
-}
-
-func dumpPathTree(t testing.TB, ctx context.Context, adapter block.Adapter, qk block.QualifiedKey) []string {
-	t.Helper()
-	tree := make([]string, 0)
-
-	uri, err := url.Parse(qk.Format())
-	require.NoError(t, err)
-
-	w, err := adapter.GetWalker(uri)
-	require.NoError(t, err)
-
-	walker := store.NewWrapper(w, uri)
-	require.NoError(t, err)
-
-	err = walker.Walk(ctx, block.WalkOptions{}, func(e block.ObjectStoreEntry) error {
-		_, p, _ := strings.Cut(e.Address, uri.String())
-		tree = append(tree, p)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking on '%s': %s", uri.String(), err)
-	}
-	sort.Strings(tree)
-	return tree
-}
-
-func createMultipartFile() ([][]byte, []byte) {
-	const (
-		multipartNumberOfParts = 3
-		multipartPartSize      = 5 * 1024 * 1024
-	)
-	parts := make([][]byte, multipartNumberOfParts)
-	var partsConcat []byte
-	for i := 0; i < multipartNumberOfParts; i++ {
-		parts[i] = randstr.Bytes(multipartPartSize + i)
-		partsConcat = append(partsConcat, parts[i]...)
-	}
-	return parts, partsConcat
-}
-
-func testAdapterMultipartUpload(t *testing.T, adapter block.Adapter, storageNamespace string) {
-	ctx := context.Background()
-	parts, full := createMultipartFile()
-
-	cases := []struct {
-		name string
-		path string
-	}{
-		{"simple", "abc"},
-		{"nested", "foo/bar"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			blockstoreType := adapter.BlockstoreType()
-			obj := block.ObjectPointer{
-				StorageNamespace: storageNamespace,
-				Identifier:       c.path,
-				IdentifierType:   block.IdentifierTypeRelative,
-			}
-			// List parts on non-existing part
-			_, err := adapter.ListParts(ctx, obj, "invalidId", block.ListPartsOpts{})
-			if blockstoreType != block.BlockstoreTypeS3 {
-				require.ErrorIs(t, err, block.ErrOperationNotSupported)
-			} else {
-				require.NotNil(t, err)
-			}
-
-			resp, err := adapter.CreateMultiPartUpload(ctx, obj, nil, block.CreateMultiPartUploadOpts{})
-			require.NoError(t, err)
-
-			multiParts := make([]block.MultipartPart, len(parts))
-			for i, content := range parts {
-				partNumber := i + 1
-				partResp, err := adapter.UploadPart(ctx, obj, int64(len(content)), bytes.NewReader(content), resp.UploadID, partNumber)
-				require.NoError(t, err)
-				multiParts[i].PartNumber = partNumber
-				multiParts[i].ETag = partResp.ETag
-			}
-
-			// List parts after upload
-			listResp, err := adapter.ListParts(ctx, obj, resp.UploadID, block.ListPartsOpts{})
-			if blockstoreType != block.BlockstoreTypeS3 {
-				require.ErrorIs(t, err, block.ErrOperationNotSupported)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, len(parts), len(listResp.Parts))
-				for i, part := range listResp.Parts {
-					require.Equal(t, multiParts[i].PartNumber, part.PartNumber)
-					require.Equal(t, int64(len(parts[i])), part.Size)
-					require.Equal(t, multiParts[i].ETag, part.ETag)
-					require.False(t, listResp.IsTruncated)
-				}
-			}
-
-			// List parts partial
-			const maxPartsConst = 2
-			maxParts := int32(maxPartsConst)
-			listResp, err = adapter.ListParts(ctx, obj, resp.UploadID, block.ListPartsOpts{MaxParts: &maxParts})
-			if blockstoreType != block.BlockstoreTypeS3 {
-				require.ErrorIs(t, err, block.ErrOperationNotSupported)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, int(maxParts), len(listResp.Parts))
-				require.True(t, listResp.IsTruncated)
-				require.Equal(t, strconv.Itoa(int(maxParts)), *listResp.NextPartNumberMarker)
-			}
-
-			_, err = adapter.CompleteMultiPartUpload(ctx, obj, resp.UploadID, &block.MultipartUploadCompletion{
-				Part: multiParts,
-			})
-			require.NoError(t, err)
-
-			// List parts after complete should fail
-			_, err = adapter.ListParts(ctx, obj, resp.UploadID, block.ListPartsOpts{})
-			if blockstoreType != block.BlockstoreTypeS3 {
-				require.ErrorIs(t, err, block.ErrOperationNotSupported)
-			} else {
-				require.NotNil(t, err)
-			}
-
-			reader, err := adapter.Get(ctx, obj)
-			require.NoError(t, err)
-
-			got, err := io.ReadAll(reader)
-			require.NoError(t, err)
-
-			require.Equal(t, full, got)
-		})
-	}
-}
-
-func testAdapterExists(t *testing.T, adapter block.Adapter, storageNamespace string) {
-	// TODO (niro): Test abs paths
-	const contents = "exists"
-	ctx := context.Background()
-	err := adapter.Put(ctx, block.ObjectPointer{
-		StorageNamespace: storageNamespace,
-		Identifier:       contents,
-		IdentifierType:   block.IdentifierTypeRelative,
-	}, int64(len(contents)), strings.NewReader(contents), block.PutOpts{})
-	require.NoError(t, err)
-
-	err = adapter.Put(ctx, block.ObjectPointer{
-		StorageNamespace: storageNamespace,
-		Identifier:       "nested/and/" + contents,
-		IdentifierType:   block.IdentifierTypeRelative,
-	}, int64(len(contents)), strings.NewReader(contents), block.PutOpts{})
-	require.NoError(t, err)
-
-	cases := []struct {
-		name   string
-		path   string
-		exists bool
-	}{
-		{"exists", "exists", true},
-		{"nested_exists", "nested/and/exists", true},
-		{"simple_missing", "missing", false},
-		{"nested_missing", "nested/down", false},
-		{"nested_deep_missing", "nested/quite/deeply/and/missing", false},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			ok, err := adapter.Exists(ctx, block.ObjectPointer{
-				StorageNamespace: storageNamespace,
-				Identifier:       tt.path,
-				IdentifierType:   block.IdentifierTypeRelative,
-			})
-			require.NoError(t, err)
-			require.Equal(t, tt.exists, ok)
-		})
-	}
-}
-
+// Parameterized test of the GetRange functionality
 func testAdapterGetRange(t *testing.T, adapter block.Adapter, storageNamespace string) {
 	ctx := context.Background()
 	part1 := "this is the first part "
 	part2 := "this is the last part"
-	err := adapter.Put(ctx, block.ObjectPointer{
+	_, err := adapter.Put(ctx, block.ObjectPointer{
+		StorageID:        "",
 		StorageNamespace: storageNamespace,
 		Identifier:       "test_file",
 		IdentifierType:   block.IdentifierTypeRelative,
@@ -367,6 +63,7 @@ func testAdapterGetRange(t *testing.T, adapter block.Adapter, storageNamespace s
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			reader, err := adapter.GetRange(ctx, block.ObjectPointer{
+				StorageID:        "",
 				StorageNamespace: storageNamespace,
 				Identifier:       "test_file",
 				IdentifierType:   block.IdentifierTypeRelative,
@@ -381,6 +78,7 @@ func testAdapterGetRange(t *testing.T, adapter block.Adapter, storageNamespace s
 	}
 }
 
+// Parameterized test to GetWalker from the Storage Adapter and check that it works
 func testAdapterWalker(t *testing.T, adapter block.Adapter, storageNamespace string) {
 	ctx := context.Background()
 	const (
@@ -391,7 +89,8 @@ func testAdapterWalker(t *testing.T, adapter block.Adapter, storageNamespace str
 
 	for i := 0; i < filesAndFolders; i++ {
 		for j := 0; j < filesAndFolders; j++ {
-			err := adapter.Put(ctx, block.ObjectPointer{
+			_, err := adapter.Put(ctx, block.ObjectPointer{
+				StorageID:        "",
 				StorageNamespace: storageNamespace,
 				Identifier:       fmt.Sprintf("%s/folder_%d/test_file_%d", testPrefix, filesAndFolders-i-1, filesAndFolders-j-1),
 				IdentifierType:   block.IdentifierTypeRelative,
@@ -400,7 +99,8 @@ func testAdapterWalker(t *testing.T, adapter block.Adapter, storageNamespace str
 		}
 	}
 
-	err := adapter.Put(ctx, block.ObjectPointer{
+	_, err := adapter.Put(ctx, block.ObjectPointer{
+		StorageID:        "",
 		StorageNamespace: storageNamespace,
 		Identifier:       fmt.Sprintf("%s/folder_0.txt", testPrefix),
 		IdentifierType:   block.IdentifierTypeRelative,
@@ -425,12 +125,12 @@ func testAdapterWalker(t *testing.T, adapter block.Adapter, storageNamespace str
 		},
 	}
 	for _, tt := range cases {
-		qk, err := adapter.ResolveNamespace(storageNamespace, filepath.Join(testPrefix, tt.prefix), block.IdentifierTypeRelative)
+		qk, err := adapter.ResolveNamespace("", storageNamespace, filepath.Join(testPrefix, tt.prefix), block.IdentifierTypeRelative)
 		require.NoError(t, err)
 		uri, err := url.Parse(qk.Format())
 		require.NoError(t, err)
 		t.Run(tt.name, func(t *testing.T) {
-			reader, err := adapter.GetWalker(uri)
+			reader, err := adapter.GetWalker("", block.WalkerOptions{StorageURI: uri})
 			require.NoError(t, err)
 
 			var results []string
@@ -462,4 +162,80 @@ func testAdapterWalker(t *testing.T, adapter block.Adapter, storageNamespace str
 			}
 		})
 	}
+}
+
+// Test request for a presigned URL for temporary access
+func testGetPreSignedURL(t *testing.T, adapter block.Adapter, storageNamespace string) {
+	preSignedURL, exp := getPresignedURLBasicTest(t, adapter, storageNamespace)
+	require.NotNil(t, exp)
+	expectedExpiry := expectedURLExp(adapter)
+	require.Equal(t, expectedExpiry, *exp)
+	_, err := url.Parse(preSignedURL)
+	require.NoError(t, err)
+}
+
+// Test request for a presigned URL with an endpoint override
+func testGetPreSignedURLEndpointOverride(t *testing.T, adapter block.Adapter, storageNamespace string, oe *url.URL) {
+	preSignedURL, exp := getPresignedURLBasicTest(t, adapter, storageNamespace)
+	require.NotNil(t, exp)
+	expectedExpiry := expectedURLExp(adapter)
+	require.Equal(t, expectedExpiry, *exp)
+	u, err := url.Parse(preSignedURL)
+	require.NoError(t, err)
+	require.Equal(t, u.Scheme, oe.Scheme)
+	require.Contains(t, u.Host, oe.Host)
+}
+
+func getPresignedURLBasicTest(t *testing.T, adapter block.Adapter, storageNamespace string) (string, *time.Time) {
+	ctx := context.Background()
+	obj, _ := objPointers(storageNamespace)
+
+	preSignedURL, exp, err := adapter.GetPreSignedURL(ctx, obj, block.PreSignModeRead)
+
+	if adapter.BlockstoreType() == block.BlockstoreTypeGS {
+		require.ErrorContains(t, err, "no credentials found")
+		return "", nil
+	} else if adapter.BlockstoreType() == block.BlockstoreTypeLocal {
+		require.ErrorIs(t, err, block.ErrOperationNotSupported)
+		return "", nil
+	}
+	require.NoError(t, err)
+	return preSignedURL, &exp
+}
+
+func expectedURLExp(adapter block.Adapter) time.Time {
+	if adapter.BlockstoreType() == block.BlockstoreTypeAzure {
+		// we didn't implement expiry for Azure yet
+		return time.Time{}
+	} else {
+		return NowMockDefault().Add(block.DefaultPreSignExpiryDuration)
+	}
+}
+
+func dumpPathTree(t testing.TB, ctx context.Context, adapter block.Adapter, qk block.QualifiedKey) []string {
+	t.Helper()
+	tree := make([]string, 0)
+
+	p := qk.Format()
+	uri, err := url.Parse(p)
+	require.NoError(t, err, "URL Parse Error")
+
+	walker, err := adapter.GetWalker("", block.WalkerOptions{StorageURI: uri})
+	require.NoError(t, err, "GetWalker failed")
+
+	wwalker := block.NewWalkerWrapper(walker, uri)
+	err = wwalker.Walk(ctx, block.WalkOptions{}, func(e block.ObjectStoreEntry) error {
+		_, p, _ := strings.Cut(e.Address, uri.String())
+		tree = append(tree, p)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking on '%s': %s", uri.String(), err)
+	}
+	sort.Strings(tree)
+	return tree
+}
+
+func NowMockDefault() time.Time {
+	return time.Date(2024, time.January, 0, 0, 0, 0, 0, time.UTC)
 }

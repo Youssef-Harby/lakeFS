@@ -39,7 +39,9 @@ class TestLoginConfig(unittest.TestCase):
         model = lakefs_sdk.models.login_config.LoginConfig()  # noqa: E501
         if include_optional :
             return LoginConfig(
-                rbac = 'simplified', 
+                rbac = 'none', 
+                username_ui_placeholder = '', 
+                password_ui_placeholder = '', 
                 login_url = '', 
                 login_failed_message = '', 
                 fallback_login_url = '', 

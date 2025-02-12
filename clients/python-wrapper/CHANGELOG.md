@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## v0.8.0
+
+:new: What's new:
+
+- Use hidden branch in transactions (#8459)
+
+:bug: Bugs fixed:
+
+- Fix objects() return type (#8154)
+
+## v0.7.1
+
+:bug: Bugs fixed
+
+- Show deprecation warnings from wrapper by default (#7982)
+- Fix file creation mode which affected some large (>32MiB) uploads (#7928)
+
+## v0.7.0
+:new: What's new:
+
+- AWS role Authentication: Initiate lakeFS Python client sessions securely using your AWS Role. (#7874)  [Read more](https://docs.lakefs.io/reference/security/external-principals-aws.html#login-with-python)
+ 
+:bug: Bugs fixed:
+
+- ObjectWriter write buffer as binary always (#7903)
+
+## v0.6.2
+
+:new: What's new:
+
+- Expose "allow_empty" and "force" flags for Merge (#7820)
+
 ## v0.6.1
 
 :bug: Bugs fixed:

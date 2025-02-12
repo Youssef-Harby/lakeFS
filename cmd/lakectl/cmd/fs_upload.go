@@ -33,7 +33,7 @@ var fsUploadCmd = &cobra.Command{
 		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, os.Kill)
 		defer stop()
 
-		if !recursive { // Assume source is a single file
+		if !recursive || isFileOrStdin(source) {
 			if strings.HasSuffix(remotePath, uri.PathSeparator) {
 				Die("target path is not a valid URI", 1)
 			}
@@ -61,7 +61,11 @@ var fsUploadCmd = &cobra.Command{
 				c <- change
 			}
 		}()
-		s := local.NewSyncManager(ctx, client, syncFlags)
+		s := local.NewSyncManager(ctx, client, getHTTPClient(), local.Config{
+			SyncFlags:           syncFlags,
+			SkipNonRegularFiles: cfg.Local.SkipNonRegularFiles,
+			IncludePerm:         false,
+		})
 		fullPath, err := filepath.Abs(source)
 		if err != nil {
 			DieErr(err)
@@ -80,6 +84,17 @@ var fsUploadCmd = &cobra.Command{
 	},
 }
 
+func isFileOrStdin(source string) bool {
+	if source == StdinFileName {
+		return true
+	}
+	stat, err := os.Stat(source)
+	if err != nil {
+		Die("failed to stat source", 1)
+	}
+	return !stat.IsDir()
+}
+
 func upload(ctx context.Context, client apigen.ClientWithResponsesInterface, sourcePathname string, destURI *uri.URI, contentType string, syncFlags local.SyncFlags) (*apigen.ObjectStats, error) {
 	fp := Must(OpenByPath(sourcePathname))
 	defer func() {
@@ -87,7 +102,7 @@ func upload(ctx context.Context, client apigen.ClientWithResponsesInterface, sou
 	}()
 	objectPath := apiutil.Value(destURI.Path)
 	if syncFlags.Presign {
-		return helpers.ClientUploadPreSign(ctx, client, destURI.Repository, destURI.Ref, objectPath, nil, contentType, fp, syncFlags.PresignMultipart)
+		return helpers.ClientUploadPreSign(ctx, client, getHTTPClient(), destURI.Repository, destURI.Ref, objectPath, nil, contentType, fp, syncFlags.PresignMultipart)
 	}
 	return helpers.ClientUpload(ctx, client, destURI.Repository, destURI.Ref, objectPath, nil, contentType, fp)
 }

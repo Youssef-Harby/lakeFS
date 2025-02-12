@@ -55,12 +55,12 @@ func (n *noopMetadataProvider) GetMetadata() map[string]string {
 	return nil
 }
 
-func BuildMetadataProvider(logger logging.Logger, c *config.Config) cloud.MetadataProvider {
+func BuildMetadataProvider(logger logging.Logger, c *config.BaseConfig) cloud.MetadataProvider {
 	switch c.Blockstore.Type {
 	case block.BlockstoreTypeGS:
 		return gcp.NewMetadataProvider(logger)
 	case block.BlockstoreTypeS3:
-		s3Params, err := c.BlockstoreS3Params()
+		s3Params, err := c.Blockstore.BlockstoreS3Params()
 		if err != nil {
 			logger.WithError(err).Warn("Failed to create S3 client for MetadataProvider")
 			return &noopMetadataProvider{}

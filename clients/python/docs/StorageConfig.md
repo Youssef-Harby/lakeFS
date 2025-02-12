@@ -14,6 +14,10 @@ Name | Type | Description | Notes
 **import_support** | **bool** |  | 
 **import_validity_regex** | **str** |  | 
 **pre_sign_multipart_upload** | **bool** |  | [optional] 
+**blockstore_id** | **str** |  | [optional] 
+**blockstore_description** | **str** |  | [optional] 
+**backward_compatible** | **bool** |  | [optional] [default to False]
+**blockstore_extras** | **Dict[str, str]** | blockstore specific properties | [optional] 
 
 ## Example
 

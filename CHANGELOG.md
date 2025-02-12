@@ -1,5 +1,267 @@
 # Changelog
 
+# v1.49.1
+
+:bug: Bugs fixed:
+- Fix: UI Create user (#8604)
+- Fix: Change validation error message on create repository to reflect validation (#8585)
+
+# v1.49.0
+
+:new: What's new:
+- change login placeholders for remote authenticator (#8519)
+- Make http client type configurable (#8516)
+- S3GW: Support list multipart uploads (#8531)
+- Metric: Report time-to-first-byte for get object API (#8503)
+
+:bug: Bugs fixed:
+- Fix: react-dropzone dependency (#8534)
+- Add admin/superuser error handling and cleanup (#8559)
+
+
+# v1.48.2
+
+:bug: Bugs fixed:
+- added storage namespace validation on non-readonly bare repo creation (#8364)
+
+# v1.48.1
+
+:bug: Bugs fixed:
+-  Squash merges is ON by default #8482 (switched to OFF)
+
+   This bug **breaks** backwards compatibility by causing all merged to be
+   squashed by default.
+
+# v1.48.0
+
+## :warning: Do **NOT** use version 1.48.0 :warning:
+
+It squashes merges by default, which is incorrect and a breaking change (#8482)
+
+:new: What's new:
+- Upgrade to Golang 1.23 (#8452)
+- Add "squash merge" support to merge API (#8464)
+
+# v1.47.0
+
+:new: What's new:
+- S3 GW: Support PutIfAbsent (#8428)
+
+# v1.46.0
+
+:new: What's new:
+- Feature: Repository Search by Substring (#8417)
+
+# v1.45.0
+
+**Note:**
+The legacy Python client has been discontinued as of this release. Its development, distribution, and codebase have been terminated.
+
+:new: What's new:
+- Remove Python Legacy Client (#8410)
+- Add friendly name to list group members response (#8413)
+
+# v1.44.0
+
+**Note:**
+The legacy Java client has been discontinued as of this release. Its development, distribution, and codebase have been terminated.
+
+:new: What's new:
+- Support for hidden branches (#8375)
+
+:bug: Bugs fixed:
+- Fix: Auth no endpoint error (#8407)
+- Fix: Delta Exporter- Handle vacuumed objects correctly (#8409)
+- Fix: Allow pre-signed upload via the web UI (#8365)
+
+# v1.43.0
+
+:new: What's new:
+- Support Dark Mode for Text Viewer (#8371)
+
+:bug: Bugs fixed:
+- Fix: lakectl FS upload big files cause OOM (#8349)
+- Fix: CosmosDB panic in handleBatchSizeChange(#8367)
+- Fix: RepoManagementReadAll pull requests permissions (#8374)
+
+# v1.42.0
+
+:new: What's new:
+- Optionally set mtime in linkPhysicalAddress (#8338)
+
+:bug: Bugs fixed:
+- Fix: EnsureStorageNamespace close reader (#8346)
+- Fix: Git package error handling (#8345)
+
+# v1.41.0
+
+:new: What's new:
+- command to check current user in lakectl (#8322)
+
+:bug: Bugs fixed:
+- Use time of create MPU on backend storage as time of MPU (#8311)
+- Fix: Pull Requests merge errors (#8302)
+- Fix "http: read on closed response body" error (#8332)
+- Fix: Get mtime from storage server (#8329)
+
+# v1.40.0
+
+:new: What's new:
+- Added Parallelism configuration option to lakectl (#8283)
+- Experiment: Improve concurrent merge performance by weakly owning branch updates (#8268)
+- Add documentation for standalone (sparkless) GC (#8307)
+
+:bug: Bugs fixed:
+- Pass request context to import operation sub tasks (#8320)
+
+# v1.39.2
+
+:new: What's new:
+- lakectl log: add option to filter merge commits (#8142)
+- Add a deprecation and upgrade warning to python-legacy client (#8195)
+- Make update object metadata API atomic (#8264)
+
+:bug: Bugs fixed:
+- Fix: GC: Read commit explicitly when it is missing from prescanned commits (#8282)
+- Fix: Copy object mtime (#8291)
+
+# v1.38.0
+
+:new: What's new:
+- WebUI: support jsonl/ndjson file diff (#8136)
+- Separate hidden and non-hidden commands in lakectl docs (#8204)
+
+# v1.37.0
+
+:new: What's new:
+- Experimental: add update object metadata API (#8253)
+
+:bug: Bugs fixed:
+- Fix Sample Data checkbox of the Repository Create form (#8255)
+- Add Effect to PR statement (#8254)
+
+# v1.36.0
+
+:new: What's new:
+- Pull Requests for Data (#8235)
+
+:bug: Bugs fixed:
+- lakectl local checkout src uri (#8213)
+
+# v1.35.0
+
+:new: What's new:
+- AWS Pre-signed url endpoint configuration (#8170)
+
+# v1.34.0
+
+:new: What's new:
+- WebUI Dark Mode (#8137)
+
+:bug: Bugs fixed:
+- Make Blockstore Type config case insensitive (#8146)
+
+# v1.33.0
+
+**Note:**
+PLEASE READ CAREFULLY BEFORE UPGRADING TO THIS VERSION!!!
+This version removes the built-in ACLs functionality, and might require some users to take action.
+Refer to [documentation](https://docs.lakefs.io/security/access-control-lists.html) for more information.
+
+:new: What's new:
+- ACLs: Remove server usage (#8126)
+- S3 Gateway CopyObject repsect metadata directive header (#8117)
+
+# v1.32.1
+
+:bug: Bugs fixed:
+- lakectl local: fix dir seek (#8105)
+
+# v1.32.0
+
+:new: What's new:
+
+- lakectl: add --no-progress flag for disabling progress bar animation (#8093)
+
+# v1.31.1
+
+:bug: Bugs fixed:
+- Handle empty page on CosmosDB Iterator (#8066)
+
+# v1.31.0
+
+:new: What's new:
+- lakectl local: add option to ignore symlinks (#8055)
+- Allow Glue exporter to create a database per branch (#8000)
+
+# v1.30.0
+
+:new: What's new:
+- KV Scan optimization - paginate with exponential jumps (#8002)
+
+# v1.29.0
+
+:bug: Bugs fixed:
+- GCS Multipart Upload Performance Fix (#7822) (#7953)
+- Fail `revert` operation in the Python wrapper in case both `reference` and `reference_id` args are provided (#7983)
+- Show deprecation warnings from the Python wrapper by default (#7987)
+- Fix lakectl upload from standard input (#7984)
+- Resolve panic caused by nil parameter in enhanceWithFriendlyName function (#7989)
+
+# v1.28.2
+
+:bug: Bugs fixed:
+- Spark client panics when reading DataFrame from entire repository / storageNamespace (#7955)
+
+# v1.28.1
+
+:new: What's new:
+
+- Metric for open connections (#7913)
+
+# v1.28.0
+
+:new: What's new:
+- Add `flare` command (#7854)
+
+:bug: Bugs fixed:
+- Enforce MonitoredAuthService to implement EmailInviter when required (#7916)
+
+# v1.27.0
+
+:bug: Bugs fixed:
+- CosmosDB iterator to use dynamic batch size after the first list (#7892)
+- Fix S3 bucket validation for inter-region storage (#7896)
+
+# v1.26.1
+
+:new: What's new:
+- Introduce support of GCS encryption for both CMEK and CSEK (#7809)
+- Support prefix parameter in lakectl diff command (#7832)
+- Enforce same-region storage for new repositories (#7847)
+- Add metrics to auth (#7840)
+- Allow changing commit data in cherry-pick and revert (#7865)
+- Prevent unnecessary operations on write actions to read-only repository in s3 gateway (#7844)
+- Return an informative error message when using 'api/v1' for S3 GW endpoint (#7828)
+
+:bug: Bugs fixed:
+- Make batch_size in kv.Scan effective for first Scan of iterator (#7875)
+- Fix lakectl local diff slowness (#7842)
+
+# v1.25.0
+
+:new: What's new:
+- Add OS info to `lakectl` User Agent (#7759)
+- Serve GZipped Static Assets (#7788)
+- Propagate request ID from context to API auth service calls (#7803)
+- Add more context-based logging (#7804)
+- Add "allow-empty" flag to Merge (#7798)
+- Sync Manager to use HTTP client with retries (#7815)
+
+:bug: Bugs fixed:
+- `lakectl local commit`: Prevent remote changes outside synced prefix (#7796)
+- UI: Restore colors in diff view (#7808)
+
 # v1.24.0
 
 :new: What's new:

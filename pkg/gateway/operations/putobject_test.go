@@ -10,12 +10,13 @@ import (
 
 	"github.com/treeverse/lakefs/pkg/api/apiutil"
 	"github.com/treeverse/lakefs/pkg/block"
+	"github.com/treeverse/lakefs/pkg/testutil"
 	"github.com/treeverse/lakefs/pkg/upload"
 )
 
 const (
-	bucketName      = "test"
-	ObjectBlockSize = 1024 * 3
+	storageNamespace = "test"
+	ObjectBlockSize  = 1024 * 3
 
 	expensiveString = "EXPENSIVE"
 	cheapString     = "CHEAP"
@@ -43,30 +44,35 @@ func TestWriteBlob(t *testing.T) {
 				t.Fatal(err)
 			}
 			reader := bytes.NewReader(data)
-			adapter := newMockAdapter()
+			adapter := testutil.NewMockAdapter()
+			objectPointer := block.ObjectPointer{
+				StorageID:        "",
+				StorageNamespace: storageNamespace,
+				IdentifierType:   block.IdentifierTypeRelative,
+				Identifier:       upload.DefaultPathProvider.NewPath(),
+			}
 			opts := block.PutOpts{StorageClass: tc.storageClass}
-			address := upload.DefaultPathProvider.NewPath()
-			blob, err := upload.WriteBlob(context.Background(), adapter, bucketName, address, reader, tc.size, opts)
+			blob, err := upload.WriteBlob(context.Background(), adapter, objectPointer, reader, tc.size, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			// test bucketName
-			if adapter.lastBucket != bucketName && tc.size != 0 {
-				t.Fatalf("write to wrong bucket: expected:%s got:%s", bucketName, adapter.lastBucket)
+			// test storageNamespace
+			if adapter.LastStorageNamespace != storageNamespace && tc.size != 0 {
+				t.Fatalf("write to wrong storageNamespace: expected:%s got:%s", storageNamespace, adapter.LastStorageNamespace)
 			}
 			// test data size
 			expectedSize := int64(len(data))
 			if expectedSize != blob.Size {
-				t.Fatalf("expected sent size to be equal to adapter read size, got: sent:%d , adapter:%d", expectedSize, adapter.totalSize)
+				t.Fatalf("expected sent size to be equal to adapter read size, got: sent:%d , adapter:%d", expectedSize, adapter.TotalSize)
 			}
-			if adapter.totalSize != blob.Size {
-				t.Fatalf("expected blob size to be equal to adapter read size, got: blob:%d , adapter:%d", blob.Size, adapter.totalSize)
+			if adapter.TotalSize != blob.Size {
+				t.Fatalf("expected blob size to be equal to adapter read size, got: blob:%d , adapter:%d", blob.Size, adapter.TotalSize)
 			}
 			// test storage class
-			if adapter.lastStorageClass != tc.storageClass {
+			if adapter.LastStorageClass != tc.storageClass {
 				t.Errorf("expected sent storage class to be equal to requested storage class, got: %v , requested: %v",
-					adapter.lastStorageClass,
+					adapter.LastStorageClass,
 					tc.storageClass)
 			}
 

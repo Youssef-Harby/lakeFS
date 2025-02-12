@@ -29,7 +29,6 @@ const (
 	usersPoliciesPrefix    = "uPolicies"
 	usersCredentialsPrefix = "uCredentials" // #nosec G101 -- False positive: this is only a kv key prefix
 	credentialsPrefix      = "credentials"
-	expiredTokensPrefix    = "expiredTokens"
 	metadataPrefix         = "installation_metadata"
 )
 
@@ -72,14 +71,6 @@ func UserPolicyPath(userName string, policyDisplayName string) []byte {
 
 func GroupPolicyPath(groupDisplayName string, policyDisplayName string) []byte {
 	return []byte(kv.FormatPath(groupsPoliciesPrefix, groupDisplayName, policiesPrefix, policyDisplayName))
-}
-
-func ExpiredTokenPath(tokenID string) []byte {
-	return []byte(kv.FormatPath(expiredTokensPrefix, tokenID))
-}
-
-func ExpiredTokensPath() []byte {
-	return ExpiredTokenPath("")
 }
 
 func MetadataKeyPath(key string) string {
@@ -143,6 +134,7 @@ type Group struct {
 	ID          string    `db:"id"`
 	CreatedAt   time.Time `db:"created_at"`
 	DisplayName string    `db:"display_name" json:"display_name"`
+	Description *string   `db:"description" json:"description"`
 }
 
 type DBGroup struct {
@@ -273,6 +265,7 @@ func GroupFromProto(pb *GroupData) *Group {
 		CreatedAt:   pb.CreatedAt.AsTime(),
 		DisplayName: pb.DisplayName,
 		ID:          pb.DisplayName,
+		Description: &pb.Description,
 	}
 }
 
@@ -280,6 +273,7 @@ func ProtoFromGroup(g *Group) *GroupData {
 	return &GroupData{
 		CreatedAt:   timestamppb.New(g.CreatedAt),
 		DisplayName: g.DisplayName,
+		Description: swag.StringValue(g.Description),
 	}
 }
 
@@ -393,7 +387,7 @@ func ConvertPolicyDataList(policies []proto.Message) []*Policy {
 	return res
 }
 
-func ConvertCredDataList(s crypt.SecretStore, creds []proto.Message) ([]*Credential, error) {
+func ConvertCredDataList(s crypt.SecretStore, creds []proto.Message, withSecret bool) ([]*Credential, error) {
 	res := make([]*Credential, 0, len(creds))
 	for _, c := range creds {
 		credentialData := c.(*CredentialData)
@@ -401,7 +395,9 @@ func ConvertCredDataList(s crypt.SecretStore, creds []proto.Message) ([]*Credent
 		if err != nil {
 			return nil, fmt.Errorf("credentials for %s: %w", credentialData.AccessKeyId, err)
 		}
-		m.SecretAccessKey = ""
+		if !withSecret {
+			m.SecretAccessKey = ""
+		}
 		res = append(res, m)
 	}
 	return res, nil

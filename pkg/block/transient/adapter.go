@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,16 +23,19 @@ func New(_ context.Context) *Adapter {
 	return &Adapter{}
 }
 
-func (a *Adapter) Put(_ context.Context, _ block.ObjectPointer, _ int64, reader io.Reader, _ block.PutOpts) error {
+func (a *Adapter) Put(_ context.Context, _ block.ObjectPointer, _ int64, reader io.Reader, _ block.PutOpts) (*block.PutResponse, error) {
 	_, err := io.Copy(io.Discard, reader)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return &block.PutResponse{}, nil
 }
 
 func (a *Adapter) Get(_ context.Context, _ block.ObjectPointer) (io.ReadCloser, error) {
 	return io.NopCloser(&io.LimitedReader{R: rand.Reader, N: DefaultReaderSize}), nil
 }
 
-func (a *Adapter) GetWalker(_ *url.URL) (block.Walker, error) {
+func (a *Adapter) GetWalker(_ string, _ block.WalkerOptions) (block.Walker, error) {
 	return nil, block.ErrOperationNotSupported
 }
 
@@ -144,16 +146,24 @@ func (a *Adapter) BlockstoreType() string {
 	return block.BlockstoreTypeTransient
 }
 
-func (a *Adapter) GetStorageNamespaceInfo() block.StorageNamespaceInfo {
+func (a *Adapter) BlockstoreMetadata(_ context.Context) (*block.BlockstoreMetadata, error) {
+	return nil, block.ErrOperationNotSupported
+}
+
+func (a *Adapter) GetStorageNamespaceInfo(string) *block.StorageNamespaceInfo {
 	info := block.DefaultStorageNamespaceInfo(block.BlockstoreTypeTransient)
 	info.PreSignSupport = false
 	info.PreSignSupportUI = false
 	info.ImportSupport = false
-	return info
+	return &info
 }
 
-func (a *Adapter) ResolveNamespace(storageNamespace, key string, identifierType block.IdentifierType) (block.QualifiedKey, error) {
+func (a *Adapter) ResolveNamespace(_, storageNamespace, key string, identifierType block.IdentifierType) (block.QualifiedKey, error) {
 	return block.DefaultResolveNamespace(storageNamespace, key, identifierType)
+}
+
+func (a *Adapter) GetRegion(_ context.Context, _, _ string) (string, error) {
+	return "", block.ErrOperationNotSupported
 }
 
 func (a *Adapter) RuntimeStats() map[string]string {
@@ -165,5 +175,8 @@ func (a *Adapter) GetPresignUploadPartURL(_ context.Context, _ block.ObjectPoint
 }
 
 func (a *Adapter) ListParts(_ context.Context, _ block.ObjectPointer, _ string, _ block.ListPartsOpts) (*block.ListPartsResponse, error) {
+	return nil, block.ErrOperationNotSupported
+}
+func (a *Adapter) ListMultipartUploads(_ context.Context, _ block.ObjectPointer, _ block.ListMultipartUploadsOpts) (*block.ListMultipartUploadsResponse, error) {
 	return nil, block.ErrOperationNotSupported
 }

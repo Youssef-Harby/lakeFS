@@ -22,7 +22,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: "1.21.4"
+          go-version: "1.23"
         id: go
 
       - uses: actions/setup-node@v4
@@ -37,13 +37,13 @@ jobs:
 
       - name: Generate code
         run: |
-          make -j3 gen-api VERSION=${{ steps.version.outputs.tag }}
+          make -j3 gen-api gen-code VERSION=${{ steps.version.outputs.tag }}
           mkdir webui/dist
           touch webui/dist/index.html
-          tar -cf /tmp/generated.tar.gz .
+          tar -czf /tmp/generated.tar.gz .
 
       - name: Store generated code
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
             name: generated-code
             path: /tmp/generated.tar.gz
@@ -54,7 +54,7 @@ jobs:
           mvn -Passembly -DfinalName=client -DskipTests --batch-mode --update-snapshots package
 
       - name: Store client assembly
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: client-assembly
           path: clients/hadoopfs/target/client.jar
@@ -78,17 +78,17 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: "1.21.4"
+          go-version: "1.23"
         id: go
 
       - name: Retrieve generated code
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.8
         with:
           name: generated-code
           path: /tmp/
 
       - name: Unpack generated code
-        run: tar -xf /tmp/generated.tar.gz
+        run: tar -xzvf /tmp/generated.tar.gz
 
       - name: Extract version
         shell: bash
@@ -108,24 +108,79 @@ jobs:
           outputs: type=docker,dest=/tmp/lakefs.tar
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: lakefs-image
           path: /tmp/lakefs.tar
 
   compatibility-checks-client:
     name: Test lakeFS Hadoop FileSystem compatibility
-    needs: gen-code
+    needs: [gen-code]
     strategy:
       fail-fast: false
       matrix:
-        # Removing a version from this list means the published client is no longer compatible with
-        # that lakeFS version.
-        lakefs_version: [ 0.113.0, 1.0.0, 1.1.0, 1.2.0, 1.3.0, 1.3.1, 1.4.0, 1.5.0, 1.6.0, 1.7.0, 1.8.0, 1.9.0, 1.9.1, 1.10.0, 1.11.0, 1.11.1, 1.12.0, 1.12.1, 1.13.0, 1.14.0, 1.14.1, 1.15.0, 1.16.0, 1.17.0, 1.18.0, 1.19.0, 1.20.0, 1.21.0, 1.22.0, 1.23.0, 1.24.0 ]
+        # Removing a version from this list means the published client is no longer tested for
+        # compatibility with that lakeFS version.  Like any other client it can still rely on
+        # the lakeFS 1.0 API guarantees.
+        lakefs_version:
+          - 0.113.0
+          - 1.0.0
+          - 1.1.0
+          - 1.2.0
+          - 1.3.1
+          - 1.4.0
+          - 1.5.0
+          - 1.6.0
+          - 1.7.0
+          - 1.8.0
+          - 1.9.1
+          - 1.10.0
+          - 1.11.1
+          - 1.12.1
+          - 1.13.0
+          - 1.14.1
+          - 1.15.0
+          - 1.16.0
+          - 1.17.0
+          - 1.18.0
+          - 1.19.0
+          - 1.20.0
+          - 1.21.0
+          - 1.22.0
+          - 1.23.0
+          - 1.24.0
+          - 1.25.0
+          - 1.26.1
+          - 1.27.0
+          - 1.28.2
+          - 1.29.0
+          - 1.30.0
+          - 1.31.1
+          - 1.32.1
+          - 1.33.0
+          - 1.34.0
+          - 1.35.0
+          - 1.36.0
+          - 1.37.0
+          - 1.38.0
+          - 1.39.2
+          - 1.40.0
+          - 1.41.0
+          - 1.42.0
+          - 1.43.0
+          - 1.44.0
+          - 1.45.0
+          - 1.46.0
+          - 1.47.0
+          # Do *not* test 1.48.0, we withdrew it.
+          - 1.48.1
+          - 1.48.2
+          - 1.49.0
+          - 1.49.1
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ matrix.lakefs_version }}
-      REPO: treeverse
+      REGISTRY: treeverse
       SPARK_TAG: 3
     steps:
       - name: Check-out code
@@ -158,7 +213,7 @@ jobs:
         with:
           compose-directory: test/spark
         env:
-          REPO: treeverse
+          REGISTRY: treeverse
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           LAKEFS_DATABASE_TYPE: postgres
@@ -167,7 +222,7 @@ jobs:
           LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY: ${{ secrets.ESTI_AWS_SECRET_ACCESS_KEY }}
 
       - name: Retrieve client
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.8
         with:
           name: client-assembly
           path: clients/hadoopfs/target
@@ -191,7 +246,7 @@ jobs:
 
   compatibility-checks-server:
     name: Test lakeFS server FileSystem compatibility
-    needs: [gen-code, deploy-image]
+    needs: [deploy-image]
     strategy:
       fail-fast: false
       matrix:
@@ -203,7 +258,7 @@ jobs:
       CLIENT_VERSION: ${{ matrix.client_version }}
       TAG: ${{ needs.deploy-image.outputs.tag }}
       IMAGE_ID: ${{ needs.deploy-image.outputs.image_id }}
-      REPO: treeverse
+      REGISTRY: treeverse
       SPARK_TAG: 3
     steps:
       - name: Check-out code
@@ -213,7 +268,7 @@ jobs:
         uses: docker/setup-buildx-action@v2
 
       - name: Download artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.8
         with:
           name: lakefs-image
           path: /tmp
@@ -248,7 +303,7 @@ jobs:
         with:
           compose-directory: test/spark
         env:
-          REPO: treeverse
+          REGISTRY: treeverse
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           LAKEFS_DATABASE_TYPE: postgres

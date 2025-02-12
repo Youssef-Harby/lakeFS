@@ -24,6 +24,15 @@ from lakefs.exceptions import (
 )
 
 
+class LakeFSDeprecationWarning(Warning):
+    """
+    Warning about use of a deprecated lakeFS or client feature. Unlike
+    `DeprecationWarning`, this class is displayed by default. See
+    `default warning filter <https://docs.python.org/3/library/warnings.html#default-warning-filter>`_
+    for how to disable it.
+    """
+
+
 class _BaseBranch(Reference):
 
     def object(self, path: str) -> WriteableObject:
@@ -143,7 +152,7 @@ class Branch(_BaseBranch):
             res = self._client.sdk_client.branches_api.cherry_pick(self._repo_id, self._id, cherry_pick_creation)
             return Commit(**res.dict())
 
-    def create(self, source_reference: ReferenceType, exist_ok: bool = False) -> Branch:
+    def create(self, source_reference: ReferenceType, exist_ok: bool = False, **kwargs) -> Branch:
         """
         Create a new branch in lakeFS from this object
 
@@ -171,7 +180,7 @@ class Branch(_BaseBranch):
             return e
 
         reference_id = source_reference if isinstance(source_reference, str) else source_reference.id
-        branch_creation = lakefs_sdk.BranchCreation(name=self._id, source=reference_id)
+        branch_creation = lakefs_sdk.BranchCreation(name=self._id, source=reference_id, **kwargs)
         with api_exception_handler(handle_conflict):
             self._client.sdk_client.branches_api.create_branch(self._repo_id, branch_creation)
         return self
@@ -244,8 +253,13 @@ class Branch(_BaseBranch):
 
         if reference_id is not None:
             warnings.warn(
-                "reference_id is deprecated, please use the `reference` argument.", DeprecationWarning
+                "reference_id is deprecated, please use the `reference` argument.", LakeFSDeprecationWarning
             )
+            # We show the error in case both are provided only after showing the deprecation warning, in order
+            # for the user to have the most contextual clarity.
+            if reference is not None:
+                raise ValueError("`reference_id` and `reference` both provided "
+                                 "Use only the `reference` argument.")
 
         # Handle reference_id as a deprecated alias to reference.
         reference = reference or reference_id
@@ -328,7 +342,7 @@ class _Transaction(_BaseBranch):
         self._source_branch = branch_id
 
         tx_name = self._get_tx_name()
-        self._tx_branch = Branch(repository_id, tx_name, client).create(branch_id)
+        self._tx_branch = Branch(repository_id, tx_name, client).create(branch_id, hidden=True)
         super().__init__(repository_id, tx_name, client)
 
     @property

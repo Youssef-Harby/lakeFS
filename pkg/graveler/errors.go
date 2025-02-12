@@ -30,6 +30,7 @@ var (
 	ErrInvalidTagID                 = fmt.Errorf("tag id: %w", ErrInvalidValue)
 	ErrInvalid                      = errors.New("validation error")
 	ErrInvalidType                  = fmt.Errorf("invalid type: %w", ErrInvalid)
+	ErrInvalidStorageID             = fmt.Errorf("storage id: %w", ErrInvalidValue)
 	ErrInvalidRepositoryID          = fmt.Errorf("repository id: %w", ErrInvalidValue)
 	ErrRequiredValue                = fmt.Errorf("required value: %w", ErrInvalid)
 	ErrCommitNotFound               = fmt.Errorf("commit %w", ErrNotFound)
@@ -37,6 +38,7 @@ var (
 	ErrRepositoryNotFound           = fmt.Errorf("repository %w", ErrNotFound)
 	ErrRepositoryInDeletion         = errors.New("repository in deletion")
 	ErrBranchNotFound               = fmt.Errorf("branch %w", ErrNotFound)
+	ErrSameBranch                   = fmt.Errorf("same branch %w", ErrInvalid)
 	ErrTagNotFound                  = fmt.Errorf("tag %w", ErrNotFound)
 	ErrNoChanges                    = wrapError(ErrUserVisible, "no changes")
 	ErrConflictFound                = wrapError(ErrUserVisible, "conflict found")
@@ -60,6 +62,10 @@ var (
 	ErrSkipValueUpdate              = errors.New("skip value update")
 	ErrImport                       = wrapError(ErrUserVisible, "import error")
 	ErrReadOnlyRepository           = wrapError(ErrUserVisible, "read-only repository")
+	ErrPullRequestNotFound          = fmt.Errorf("pull request %w", ErrNotFound)
+	ErrPullRequestExists            = fmt.Errorf("pull request already exists: %w", ErrNotUnique)
+	ErrInvalidPullRequestStatus     = fmt.Errorf("invalid pull request status: %w", ErrInvalid)
+	ErrInvalidPullRequestID         = fmt.Errorf("pull request id: %w", ErrInvalidValue)
 )
 
 // wrappedError is an error for wrapping another error while ignoring its message.

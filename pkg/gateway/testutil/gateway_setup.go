@@ -42,7 +42,8 @@ func GetBasicHandler(t *testing.T, authService *FakeAuthService, repoName string
 	blockstoreType, _ := os.LookupEnv(testutil.EnvKeyUseBlockAdapter)
 	blockAdapter := testutil.NewBlockAdapterByType(t, blockstoreType)
 
-	conf, err := config.NewConfig("")
+	conf := &config.BaseConfig{}
+	conf, err = config.NewConfig("", conf)
 	testutil.MustDo(t, "config", err)
 
 	c, err := catalog.New(ctx, catalog.Config{
@@ -60,10 +61,10 @@ func GetBasicHandler(t *testing.T, authService *FakeAuthService, repoName string
 		storageNamespace = "replay"
 	}
 
-	_, err = c.CreateRepository(ctx, repoName, storageNamespace, "main", false)
+	_, err = c.CreateRepository(ctx, repoName, "", storageNamespace, "main", false)
 	testutil.Must(t, err)
 
-	handler := gateway.NewHandler(authService.Region, c, multipartTracker, blockAdapter, authService, []string{authService.BareDomain}, &stats.NullCollector{}, upload.DefaultPathProvider, nil, config.DefaultLoggingAuditLogLevel, true, false)
+	handler := gateway.NewHandler(authService.Region, c, multipartTracker, blockAdapter, authService, []string{authService.BareDomain}, &stats.NullCollector{}, upload.DefaultPathProvider, nil, config.DefaultLoggingAuditLogLevel, true, false, false)
 
 	return handler, &Dependencies{
 		blocks:  blockAdapter,

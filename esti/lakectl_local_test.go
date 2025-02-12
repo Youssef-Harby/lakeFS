@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/treeverse/lakefs/pkg/block"
@@ -257,6 +258,137 @@ func TestLakectlLocal_clone(t *testing.T) {
 	})
 }
 
+func TestLakectlLocal_posix_permissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	fd, err := os.CreateTemp(tmpDir, "")
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	vars := map[string]string{
+		"REPO":    repoName,
+		"STORAGE": storage,
+		"BRANCH":  mainBranch,
+		"REF":     mainBranch,
+	}
+
+	// No repo
+	vars["LOCAL_DIR"] = tmpDir
+	RunCmdAndVerifyFailureWithFile(t, Lakectl()+" local clone lakefs://"+repoName+"/"+mainBranch+"/ "+tmpDir, false, "lakectl_local_clone_non_empty", vars)
+
+	runCmd(t, Lakectl()+" repo create lakefs://"+repoName+" "+storage, false, false, vars)
+	runCmd(t, Lakectl()+" log lakefs://"+repoName+"/"+mainBranch, false, false, vars)
+
+	// Bad ref
+	RunCmdAndVerifyFailureWithFile(t, Lakectl()+" local init lakefs://"+repoName+"/bad_ref/ "+tmpDir, false, "lakectl_local_commit_not_found", vars)
+
+	t.Run("diff with posix permissions", func(t *testing.T) {
+		dataDir, err := os.MkdirTemp(tmpDir, "")
+		require.NoError(t, err)
+		vars["LOCAL_DIR"] = dataDir
+		vars["PREFIX"] = "posix-diff"
+
+		lakectl := LakectlWithPosixPerms()
+		RunCmdAndVerifyContainsText(t, lakectl+" local clone lakefs://"+repoName+"/"+mainBranch+"/"+vars["PREFIX"]+" "+dataDir, false, "Successfully cloned lakefs://${REPO}/${REF}/${PREFIX}/ to ${LOCAL_DIR}.", vars)
+		localVerifyDirContents(t, dataDir, []string{})
+
+		// Add new files to path
+		localCreateTestData(t, vars, []string{
+			vars["PREFIX"] + uri.PathSeparator + "with-diff.txt",
+			vars["PREFIX"] + uri.PathSeparator + "no-diff.txt",
+		})
+
+		res := runCmd(t, lakectl+" local pull "+dataDir, false, false, vars)
+		require.Contains(t, res, "download with-diff.txt")
+		require.Contains(t, res, "download no-diff.txt")
+
+		commitMessage := "'initialize' posix permissions for the remote repo"
+		runCmd(t, lakectl+" local commit "+dataDir+" -m \""+commitMessage+"\"", false, false, vars)
+
+		sanitizedResult := runCmd(t, lakectl+" local status "+dataDir, false, false, vars)
+		require.Contains(t, sanitizedResult, "No diff found")
+
+		err = os.Chmod(filepath.Join(dataDir, "with-diff.txt"), 0755)
+		require.NoError(t, err)
+
+		sanitizedResult = runCmd(t, lakectl+" local status "+dataDir, false, false, vars)
+
+		require.Contains(t, sanitizedResult, "with-diff.txt")
+		require.NotContains(t, sanitizedResult, "no-diff.txt")
+	})
+
+	t.Run("sync folders deletion", func(t *testing.T) {
+		dataDir, err := os.MkdirTemp(tmpDir, "")
+		require.NoError(t, err)
+		vars["LOCAL_DIR"] = dataDir
+		vars["PREFIX"] = "posix-folder-deletion"
+
+		lakectl := LakectlWithPosixPerms()
+		RunCmdAndVerifyContainsText(t, lakectl+" local clone lakefs://"+repoName+"/"+mainBranch+"/"+vars["PREFIX"]+" "+dataDir, false, "Successfully cloned lakefs://${REPO}/${REF}/${PREFIX}/ to ${LOCAL_DIR}.", vars)
+		localVerifyDirContents(t, dataDir, []string{})
+
+		// upload a new empty folder
+		emptyDirName := "empty_local_folder"
+		localDirPath := filepath.Join(dataDir, "empty_local_folder")
+		err = os.Mkdir(localDirPath, fileutil.DefaultDirectoryMask)
+		require.NoError(t, err)
+		commitMessage := "add empty folder"
+		res := runCmd(t, lakectl+" local commit "+dataDir+" -m \""+commitMessage+"\"", false, false, vars)
+		require.Contains(t, res, fmt.Sprintf("upload %s", emptyDirName))
+
+		// remove the empty folder locally, and validate it's removed from the remote repo
+		err = os.Remove(localDirPath)
+		require.NoError(t, err)
+		commitMessage = "remove empty folder"
+		res = runCmd(t, lakectl+" local commit "+dataDir+" -m \""+commitMessage+"\"", false, false, vars)
+		require.Contains(t, res, fmt.Sprintf("delete remote path: %s/", emptyDirName))
+
+		res = runCmd(t, lakectl+" local status "+dataDir, false, false, vars)
+		require.Contains(t, res, "No diff found")
+		require.NotContains(t, res, emptyDirName)
+	})
+
+	t.Run("existing posix path", func(t *testing.T) {
+		dataDir, err := os.MkdirTemp(tmpDir, "")
+		require.NoError(t, err)
+		vars["LOCAL_DIR"] = dataDir
+		vars["PREFIX"] = "existing_path"
+		vars["FILE_PATH"] = vars["PREFIX"]
+		lakectl := LakectlWithPosixPerms()
+
+		RunCmdAndVerifyContainsText(t, lakectl+" local clone lakefs://"+repoName+"/"+mainBranch+"/"+vars["PREFIX"]+" "+dataDir, false, "Successfully cloned lakefs://${REPO}/${REF}/${PREFIX}/ to ${LOCAL_DIR}.", vars)
+		localVerifyDirContents(t, dataDir, []string{})
+
+		// Add new files to path
+		contents := []string{
+			vars["PREFIX"] + uri.PathSeparator + "with-diff.txt",
+			vars["PREFIX"] + uri.PathSeparator + "subdir1" + uri.PathSeparator + "no-diff.txt",
+		}
+		localCreateTestData(t, vars, contents)
+
+		// upload a new empty folder
+		emptyDirName := "empty_dir"
+		emptyDirPath := filepath.Join(dataDir, emptyDirName)
+		err = os.Mkdir(emptyDirPath, fileutil.DefaultDirectoryMask)
+		require.NoError(t, err)
+
+		commitMessage := "sync local"
+		res := runCmd(t, lakectl+" local commit "+dataDir+" -m \""+commitMessage+"\"", false, false, vars)
+		require.Contains(t, res, fmt.Sprintf("upload %s", emptyDirName))
+
+		// clone path to a new local dir
+		dataDir2, err := os.MkdirTemp(tmpDir, "")
+		require.NoError(t, err)
+		vars["LOCAL_DIR"] = dataDir2
+		RunCmdAndVerifyContainsText(t, lakectl+" local clone lakefs://"+repoName+"/"+mainBranch+"/"+vars["PREFIX"]+" "+dataDir2, false, "Successfully cloned lakefs://${REPO}/${REF}/${PREFIX}/ to ${LOCAL_DIR}.", vars)
+		for _, f := range append(contents, "empty_dir") {
+			p := filepath.Join(dataDir2, strings.TrimPrefix(f, vars["PREFIX"]))
+			_, err = os.Stat(p)
+			require.NoError(t, err)
+		}
+	})
+}
+
 func TestLakectlLocal_pull(t *testing.T) {
 	const successStr = "Successfully synced changes!\n\nPull "
 
@@ -355,6 +487,80 @@ func TestLakectlLocal_pull(t *testing.T) {
 	}
 }
 
+func TestLakectlLocal_commitProtectedBranch(t *testing.T) {
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	tmpDir := t.TempDir()
+	fd, err := os.CreateTemp(tmpDir, "")
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+	dataDir, err := os.MkdirTemp(tmpDir, "")
+	require.NoError(t, err)
+	file := "test.txt"
+
+	vars := map[string]string{
+		"REPO":      repoName,
+		"STORAGE":   storage,
+		"BRANCH":    mainBranch,
+		"REF":       mainBranch,
+		"LOCAL_DIR": dataDir,
+		"FILE":      file,
+	}
+	runCmd(t, Lakectl()+" repo create lakefs://"+vars["REPO"]+" "+vars["STORAGE"], false, false, vars)
+	runCmd(t, Lakectl()+" branch-protect add lakefs://"+vars["REPO"]+"/  '*'", false, false, vars)
+	// BranchUpdateMaxInterval - sleep in order to overcome branch update caching
+	time.Sleep(branchProtectTimeout)
+	// Cloning local dir
+	RunCmdAndVerifyContainsText(t, Lakectl()+" local clone lakefs://"+vars["REPO"]+"/"+vars["BRANCH"]+"/ "+vars["LOCAL_DIR"], false, "Successfully cloned lakefs://${REPO}/${REF}/ to ${LOCAL_DIR}.", vars)
+	RunCmdAndVerifyContainsText(t, Lakectl()+" local status "+vars["LOCAL_DIR"], false, "No diff found", vars)
+	// Adding file to local dir
+	fd, err = os.Create(filepath.Join(vars["LOCAL_DIR"], vars["FILE"]))
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+	RunCmdAndVerifyContainsText(t, Lakectl()+" local status "+vars["LOCAL_DIR"], false, "local  ║ added  ║ test.txt", vars)
+	// Try to commit local dir, expect failure
+	RunCmdAndVerifyFailureContainsText(t, Lakectl()+" local commit -m test "+vars["LOCAL_DIR"], false, "cannot write to protected branch", vars)
+}
+
+func TestLakectlLocal_RmCommitProtectedBranch(t *testing.T) {
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	tmpDir := t.TempDir()
+	fd, err := os.CreateTemp(tmpDir, "")
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+	dataDir, err := os.MkdirTemp(tmpDir, "")
+	require.NoError(t, err)
+	file := "ro_1k.0"
+
+	vars := map[string]string{
+		"REPO":      repoName,
+		"STORAGE":   storage,
+		"BRANCH":    mainBranch,
+		"REF":       mainBranch,
+		"LOCAL_DIR": dataDir,
+		"FILE_PATH": file,
+	}
+	runCmd(t, Lakectl()+" repo create lakefs://"+vars["REPO"]+" "+vars["STORAGE"], false, false, vars)
+
+	// Cloning local dir
+	RunCmdAndVerifyContainsText(t, Lakectl()+" local clone lakefs://"+vars["REPO"]+"/"+vars["BRANCH"]+"/ "+vars["LOCAL_DIR"], false, "Successfully cloned lakefs://${REPO}/${REF}/ to ${LOCAL_DIR}.", vars)
+	RunCmdAndVerifyContainsText(t, Lakectl()+" local status "+vars["LOCAL_DIR"], false, "No diff found", vars)
+
+	// locally add a file and commit
+	fd, err = os.Create(filepath.Join(vars["LOCAL_DIR"], vars["FILE_PATH"]))
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+	RunCmdAndVerifyContainsText(t, Lakectl()+" local commit "+vars["LOCAL_DIR"]+" -m test", false, "Commit for branch \""+vars["BRANCH"]+"\" completed.", vars)
+	runCmd(t, Lakectl()+" branch-protect add lakefs://"+vars["REPO"]+"/  '*'", false, false, vars)
+	// BranchUpdateMaxInterval - sleep in order to overcome branch update caching
+	time.Sleep(branchProtectTimeout)
+	// Try delete file from local dir and then commit
+	require.NoError(t, os.Remove(filepath.Join(vars["LOCAL_DIR"], vars["FILE_PATH"])))
+	RunCmdAndVerifyContainsText(t, Lakectl()+" local status "+vars["LOCAL_DIR"], false, "local  ║ removed ║ "+vars["FILE_PATH"], vars)
+	RunCmdAndVerifyFailureContainsText(t, Lakectl()+" local commit -m test "+vars["LOCAL_DIR"], false, "cannot write to protected branch", vars)
+}
+
 func TestLakectlLocal_commit(t *testing.T) {
 	tmpDir := t.TempDir()
 	fd, err := os.CreateTemp(tmpDir, "")
@@ -440,8 +646,8 @@ func TestLakectlLocal_commit(t *testing.T) {
 			RunCmdAndVerifyContainsText(t, Lakectl()+" local status "+dataDir, false, "No diff found", vars)
 
 			// Modify local folder - add and remove files
-			os.MkdirAll(filepath.Join(dataDir, "subdir"), os.ModePerm)
-			os.MkdirAll(filepath.Join(dataDir, "subdir-a"), os.ModePerm)
+			require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "subdir"), os.ModePerm))
+			require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "subdir-a"), os.ModePerm))
 			fd, err = os.Create(filepath.Join(dataDir, "subdir", "test.txt"))
 			require.NoError(t, err)
 			fd, err = os.Create(filepath.Join(dataDir, "subdir-a", "test.txt"))
@@ -460,6 +666,219 @@ func TestLakectlLocal_commit(t *testing.T) {
 
 			// Check no diff after commit
 			RunCmdAndVerifyContainsText(t, Lakectl()+" local status "+dataDir, false, "No diff found", vars)
+		})
+	}
+}
+
+func TestLakectlLocal_commit_symlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	fd, err := os.CreateTemp(tmpDir, "")
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	vars := map[string]string{
+		"REPO":    repoName,
+		"STORAGE": storage,
+		"BRANCH":  mainBranch,
+		"REF":     mainBranch,
+		"PREFIX":  "",
+	}
+
+	// No repo
+	vars["LOCAL_DIR"] = tmpDir
+	runCmd(t, Lakectl()+" repo create lakefs://"+repoName+" "+storage, false, false, vars)
+	runCmd(t, Lakectl()+" log lakefs://"+repoName+"/"+mainBranch, false, false, vars)
+
+	tests := []struct {
+		name        string
+		skipSymlink bool
+	}{
+		{
+			name:        "skip-symlink",
+			skipSymlink: true,
+		},
+		{
+			name:        "fail-on-symlink",
+			skipSymlink: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir, err := os.MkdirTemp(tmpDir, "")
+			require.NoError(t, err)
+			file := filepath.Join(dataDir, "file1.txt")
+			require.NoError(t, os.WriteFile(file, []byte("foo"), os.ModePerm))
+			symlink := filepath.Join(dataDir, "link_file1.txt")
+			require.NoError(t, os.Symlink(file, symlink))
+
+			runCmd(t, Lakectl()+" branch create lakefs://"+repoName+"/"+tt.name+" --source lakefs://"+repoName+"/"+mainBranch, false, false, vars)
+
+			vars["LOCAL_DIR"] = dataDir
+			vars["PREFIX"] = ""
+			vars["BRANCH"] = tt.name
+			vars["REF"] = tt.name
+			lakectlCmd := Lakectl()
+			if tt.skipSymlink {
+				lakectlCmd = "LAKECTL_LOCAL_SKIP_NON_REGULAR_FILES=true " + lakectlCmd
+			}
+			runCmd(t, lakectlCmd+" local init lakefs://"+repoName+"/"+vars["BRANCH"]+"/"+vars["PREFIX"]+" "+dataDir, false, false, vars)
+			if tt.skipSymlink {
+				RunCmdAndVerifyContainsText(t, lakectlCmd+" local status "+dataDir, false, "local  ║ added  ║ file1.txt", vars)
+			} else {
+				RunCmdAndVerifyFailureContainsText(t, lakectlCmd+" local status "+dataDir, false, "link_file1.txt: not a regular file", vars)
+			}
+
+			// Commit changes to branch
+			if tt.skipSymlink {
+				RunCmdAndVerifyContainsText(t, lakectlCmd+" local commit -m test "+dataDir, false, "Commit for branch \"${BRANCH}\" completed", vars)
+			} else {
+				RunCmdAndVerifyFailureContainsText(t, lakectlCmd+" local commit -m test "+dataDir, false, "link_file1.txt: not a regular file", vars)
+			}
+
+			// Check diff after commit
+			if tt.skipSymlink {
+				RunCmdAndVerifyContainsText(t, lakectlCmd+" local status "+dataDir, false, "No diff found", vars)
+			} else {
+				RunCmdAndVerifyFailureContainsText(t, lakectlCmd+" local status "+dataDir, false, "link_file1.txt: not a regular file", vars)
+			}
+		})
+	}
+}
+
+func TestLakectlLocal_commit_remote_uncommitted(t *testing.T) {
+	tmpDir := t.TempDir()
+	fd, err := os.CreateTemp(tmpDir, "")
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	vars := map[string]string{
+		"REPO":    repoName,
+		"STORAGE": storage,
+		"BRANCH":  mainBranch,
+		"REF":     mainBranch,
+		"PREFIX":  "test-data",
+	}
+
+	runCmd(t, fmt.Sprintf("%s repo create lakefs://%s %s", Lakectl(), repoName, storage), false, false, vars)
+
+	testCases := []struct {
+		name              string
+		uncommittedRemote []string
+		uncommittedLocal  []string
+		expectFailure     bool
+		expectedMessage   string
+		withForceFlag     bool
+	}{
+		{
+			name:              "uncommitted_changes_-_none",
+			uncommittedRemote: []string{},
+			uncommittedLocal: []string{
+				"test.data",
+			},
+			expectFailure:   false,
+			expectedMessage: "Commit for branch \"${BRANCH}\" completed",
+			withForceFlag:   false,
+		},
+		{
+			name: "uncommitted_changes_-_outside",
+			uncommittedRemote: []string{
+				"otherPrefix/a",
+			},
+			uncommittedLocal: []string{
+				"test.data",
+			},
+			expectFailure:   true,
+			expectedMessage: "Branch ${BRANCH} contains uncommitted changes outside of local path '${LOCAL_DIR}'.\nTo proceed, use the --force flag.",
+			withForceFlag:   false,
+		},
+		{
+			name: "uncommitted_changes_-_inside",
+			uncommittedRemote: []string{
+				fmt.Sprintf("%s/a", vars["PREFIX"]),
+			},
+			uncommittedLocal: []string{
+				"test.data",
+			},
+			expectFailure:   false,
+			expectedMessage: "Commit for branch \"${BRANCH}\" completed",
+			withForceFlag:   false,
+		},
+		{
+			name: "uncommitted_changes_-_inside_before_outside",
+			uncommittedRemote: []string{
+				"zzz/a",
+			},
+			uncommittedLocal: []string{
+				"test.data",
+			},
+			expectFailure:   true,
+			expectedMessage: "Branch ${BRANCH} contains uncommitted changes outside of local path '${LOCAL_DIR}'.\nTo proceed, use the --force flag.",
+			withForceFlag:   false,
+		},
+		{
+			name: "uncommitted_changes_-_on_boundry",
+			uncommittedRemote: []string{
+				fmt.Sprintf("%s0", vars["PREFIX"]),
+			},
+			uncommittedLocal: []string{
+				"test.data",
+			},
+			expectFailure:   true,
+			expectedMessage: "Branch ${BRANCH} contains uncommitted changes outside of local path '${LOCAL_DIR}'.\nTo proceed, use the --force flag.",
+			withForceFlag:   false,
+		},
+		{
+			name: "uncommitted_changes_-_outside_force",
+			uncommittedRemote: []string{
+				"otherPrefix/a",
+			},
+			uncommittedLocal: []string{
+				"test.data",
+			},
+			expectFailure:   false,
+			expectedMessage: "Commit for branch \"${BRANCH}\" completed",
+			withForceFlag:   true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir, err := os.MkdirTemp(tmpDir, "")
+			require.NoError(t, err)
+
+			runCmd(t, fmt.Sprintf("%s branch create lakefs://%s/%s --source lakefs://%s/%s", Lakectl(), repoName, tc.name, repoName, mainBranch), false, false, vars)
+			vars["LOCAL_DIR"] = dataDir
+			vars["BRANCH"] = tc.name
+			vars["REF"] = tc.name
+			RunCmdAndVerifyContainsText(t, fmt.Sprintf("%s local clone lakefs://%s/%s/%s %s", Lakectl(), repoName, vars["BRANCH"], vars["PREFIX"], dataDir), false, "Successfully cloned lakefs://${REPO}/${REF}/${PREFIX}/ to ${LOCAL_DIR}.", vars)
+
+			// add remote files
+			if len(tc.uncommittedRemote) > 0 {
+				for _, f := range tc.uncommittedRemote {
+					vars["FILE_PATH"] = f
+					runCmd(t, fmt.Sprintf("%s fs upload -s files/ro_1k lakefs://%s/%s/%s", Lakectl(), vars["REPO"], vars["BRANCH"], vars["FILE_PATH"]), false, false, vars)
+
+				}
+			}
+
+			// add local files
+			for _, f := range tc.uncommittedLocal {
+				fd, err = os.Create(filepath.Join(dataDir, f))
+				require.NoError(t, err)
+				require.NoError(t, fd.Close())
+			}
+
+			force := ""
+			if tc.withForceFlag {
+				force = "--force"
+			}
+			cmd := fmt.Sprintf("%s local commit %s -m test %s", Lakectl(), force, dataDir)
+			if tc.expectFailure {
+				RunCmdAndVerifyFailureContainsText(t, cmd, false, tc.expectedMessage, vars)
+			} else {
+				RunCmdAndVerifyContainsText(t, cmd, false, tc.expectedMessage, vars)
+			}
 		})
 	}
 }

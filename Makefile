@@ -8,22 +8,20 @@ UID_GID := $(shell id -u):$(shell id -g)
 CLIENT_JARS_BUCKET="s3://treeverse-clients-us-east/"
 
 # https://openapi-generator.tech
-OPENAPI_LEGACY_GENERATOR_IMAGE=openapitools/openapi-generator-cli:v5.3.0
-OPENAPI_LEGACY_GENERATOR=$(DOCKER) run --user $(UID_GID) --rm -v $(shell pwd):/mnt $(OPENAPI_LEGACY_GENERATOR_IMAGE)
 OPENAPI_GENERATOR_IMAGE=treeverse/openapi-generator-cli:v7.0.0.1
 OPENAPI_GENERATOR=$(DOCKER) run --user $(UID_GID) --rm -v $(shell pwd):/mnt $(OPENAPI_GENERATOR_IMAGE)
 OPENAPI_RUST_GENERATOR_IMAGE=openapitools/openapi-generator-cli:v7.5.0
 OPENAPI_RUST_GENERATOR=$(DOCKER) run --user $(UID_GID) --rm -v $(shell pwd):/mnt $(OPENAPI_RUST_GENERATOR_IMAGE)
 PY_OPENAPI_GENERATOR=$(DOCKER) run -e PYTHON_POST_PROCESS_FILE="/mnt/clients/python/scripts/pydantic.sh" --user $(UID_GID) --rm -v $(shell pwd):/mnt $(OPENAPI_GENERATOR_IMAGE)
 
-GOLANGCI_LINT_VERSION=v1.58.1
+GOLANGCI_LINT_VERSION=v1.63.4
 BUF_CLI_VERSION=v1.28.1
 
 ifndef PACKAGE_VERSION
 	PACKAGE_VERSION=0.1.0-SNAPSHOT
 endif
 
-PYTHON_IMAGE=python:3
+PYTHON_IMAGE=python:3.9
 
 export PATH:= $(PATH):$(GOBINPATH)
 
@@ -67,7 +65,7 @@ clean:
 		$(UI_BUILD_DIR) \
 		$(UI_DIR)/node_modules \
 		pkg/api/apigen/lakefs.gen.go \
-		pkg/auth/client.gen.go
+		pkg/auth/*.gen.go
 
 check-licenses: check-licenses-go-mod check-licenses-npm
 
@@ -110,23 +108,7 @@ tools: ## Install tools
 	$(GOCMD) install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	$(GOCMD) install github.com/bufbuild/buf/cmd/buf@$(BUF_CLI_VERSION)
 
-client-python: sdk-python-legacy sdk-python
-
-sdk-python-legacy: api/swagger.yml  ## Generate SDK for Python client - openapi generator version 5.3.0
-	# remove the build folder as it also holds lakefs_client folder which keeps because we skip it during find
-	rm -rf clients/python-legacy/build; cd clients/python-legacy && \
-		find . -depth -name lakefs_client -prune -o ! \( -name Gemfile -or -name Gemfile.lock -or -name _config.yml -or -name .openapi-generator-ignore -or -name templates -or -name setup.mustache -or -name client.mustache -or -name python-codegen-config.yaml \) -delete
-	$(OPENAPI_LEGACY_GENERATOR) generate \
-		-i /mnt/$< \
-		-g python \
-		-t /mnt/clients/python-legacy/templates \
-		--package-name lakefs_client \
-		--http-user-agent "lakefs-python-sdk/$(PACKAGE_VERSION)-legacy" \
-		--git-user-id treeverse --git-repo-id lakeFS \
-		--additional-properties=infoName=Treeverse,infoEmail=services@treeverse.io,packageName=lakefs_client,packageVersion=$(PACKAGE_VERSION),projectName=lakefs-client,packageUrl=https://github.com/treeverse/lakeFS/tree/master/clients/python-legacy \
-		-c /mnt/clients/python-legacy/python-codegen-config.yaml \
-		-o /mnt/clients/python-legacy \
-		--ignore-file-override /mnt/clients/python/.openapi-generator-ignore
+client-python: sdk-python
 
 sdk-python: api/swagger.yml  ## Generate SDK for Python client - openapi generator version 7.0.0
 	# remove the build folder as it also holds lakefs_sdk folder which keeps because we skip it during find
@@ -154,17 +136,6 @@ sdk-rust: api/swagger.yml  ## Generate SDK for Rust client - openapi generator v
 		--additional-properties=infoName=Treeverse,infoEmail=services@treeverse.io,packageName=lakefs_sdk,packageVersion=$(PACKAGE_VERSION),packageUrl=https://github.com/treeverse/lakeFS/tree/master/clients/rust \
 		-o /mnt/clients/rust
 
-client-java-legacy: api/swagger.yml api/java-gen-ignore  ## Generate legacy SDK for Java (and Scala) client
-	rm -rf clients/java-legacy
-	$(OPENAPI_LEGACY_GENERATOR) generate \
-		-i /mnt/$< \
-		--ignore-file-override /mnt/api/java-gen-ignore \
-		-g java \
-		--invoker-package io.lakefs.clients.api \
-		--http-user-agent "lakefs-java-sdk/$(PACKAGE_VERSION)-legacy" \
-		--additional-properties hideGenerationTimestamp=true,artifactVersion=$(PACKAGE_VERSION),parentArtifactId=lakefs-parent,parentGroupId=io.lakefs,parentVersion=0,groupId=io.lakefs,artifactId='api-client',artifactDescription='lakeFS OpenAPI Java client legacy SDK',artifactUrl=https://lakefs.io,apiPackage=io.lakefs.clients.api,modelPackage=io.lakefs.clients.api.model,mainPackage=io.lakefs.clients.api,developerEmail=services@treeverse.io,developerName='Treeverse lakeFS dev',developerOrganization='lakefs.io',developerOrganizationUrl='https://lakefs.io',licenseName=apache2,licenseUrl=http://www.apache.org/licenses/,scmConnection=scm:git:git@github.com:treeverse/lakeFS.git,scmDeveloperConnection=scm:git:git@github.com:treeverse/lakeFS.git,scmUrl=https://github.com/treeverse/lakeFS \
-		-o /mnt/clients/java-legacy
-
 client-java: api/swagger.yml api/java-gen-ignore  ## Generate SDK for Java (and Scala) client
 	rm -rf clients/java
 	mkdir -p clients/java
@@ -177,14 +148,10 @@ client-java: api/swagger.yml api/java-gen-ignore  ## Generate SDK for Java (and 
 		--additional-properties disallowAdditionalPropertiesIfNotPresent=false,useSingleRequestParameter=true,hideGenerationTimestamp=true,artifactVersion=$(PACKAGE_VERSION),parentArtifactId=lakefs-parent,parentGroupId=io.lakefs,parentVersion=0,groupId=io.lakefs,artifactId='sdk',artifactDescription='lakeFS OpenAPI Java client',artifactUrl=https://lakefs.io,apiPackage=io.lakefs.clients.sdk,modelPackage=io.lakefs.clients.sdk.model,mainPackage=io.lakefs.clients.sdk,developerEmail=services@treeverse.io,developerName='Treeverse lakeFS dev',developerOrganization='lakefs.io',developerOrganizationUrl='https://lakefs.io',licenseName=apache2,licenseUrl=http://www.apache.org/licenses/,scmConnection=scm:git:git@github.com:treeverse/lakeFS.git,scmDeveloperConnection=scm:git:git@github.com:treeverse/lakeFS.git,scmUrl=https://github.com/treeverse/lakeFS \
 		-o /mnt/clients/java
 
-.PHONY: clients client-python sdk-python-legacy sdk-python client-java client-java-legacy
-clients: client-python client-java client-java-legacy sdk-rust
+.PHONY: clients client-python sdk-python client-java
+clients: client-python client-java sdk-rust
 
-package-python: package-python-client package-python-sdk
-
-package-python-client: client-python
-	$(DOCKER) run --user $(UID_GID) --rm -v $(shell pwd):/mnt -e HOME=/tmp/ -w /mnt/clients/python-legacy $(PYTHON_IMAGE) /bin/bash -c \
-		"python -m pip install build --user && python -m build --sdist --wheel --outdir dist/"
+package-python: package-python-sdk package-python-wrapper
 
 package-python-sdk: sdk-python
 	$(DOCKER) run --user $(UID_GID) --rm -v $(shell pwd):/mnt -e HOME=/tmp/ -w /mnt/clients/python $(PYTHON_IMAGE) /bin/bash -c \
@@ -206,12 +173,14 @@ gen-code: gen-api ## Run the generator for inline commands
 		./pkg/actions \
 		./pkg/auth/ \
 		./pkg/authentication \
+		./pkg/distributed \
 		./pkg/graveler \
 		./pkg/graveler/committed \
 		./pkg/graveler/sstable \
 		./pkg/kv \
 		./pkg/permissions \
-		./pkg/pyramid
+		./pkg/pyramid \
+		./tools/wrapgen/testcode
 
 LD_FLAGS := "-X github.com/treeverse/lakefs/pkg/version.Version=$(VERSION)-$(REVISION)"
 build: gen docs ## Download dependencies and build the default binary
@@ -291,13 +260,19 @@ validate-mockgen: gen-code
 validate-permissions-gen: gen-code
 	git diff --quiet -- pkg/permissions/actions.gen.go || (echo "Modification verification failed!  pkg/permissions/actions.gen.go"; false)
 
+.PHONY: validate-wrapper
+validate-wrapper: gen-code
+	git diff --quiet -- pkg/auth/service_wrapper.gen.go || (echo "Modification verification failed! pkg/auth/service_wrapper.gen.go"; false)
+	git diff --quiet -- pkg/auth/service_inviter_wrapper.gen.go || (echo "Modification verification failed! pkg/auth/service_inviter_wrapper.gen.go"; false)
+
+.PHONY: validate-wrapgen-testcode
+validate-wrapgen-testcode: gen-code
+	git diff --quiet -- ./tools/wrapgen/testcode || (echo "Modification verification failed! tools/wrapgen/testcode"; false)
+
 validate-reference:
 	git diff --quiet -- docs/reference/cli.md || (echo "Modification verification failed! docs/reference/cli.md"; false)
 
-validate-client-python: validate-python-sdk-legacy validate-python-sdk
-
-validate-python-sdk-legacy:
-	git diff --quiet -- clients/python-legacy || (echo "Modification verification failed! python client"; false)
+validate-client-python: validate-python-sdk
 
 validate-python-sdk:
 	git diff --quiet -- clients/python || (echo "Modification verification failed! python client"; false)
@@ -313,7 +288,11 @@ validate-python-wrapper:
 	git diff --quiet -- clients/python-wrapper || (echo 'Modification verification failed! python wrapper client'; false)
 
 # Run all validation/linting steps
-checks-validator: lint validate-fmt validate-proto validate-client-python validate-client-java validate-client-rust validate-reference validate-mockgen validate-permissions-gen
+checks-validator: lint validate-fmt validate-proto \
+	validate-client-python validate-client-java validate-client-rust validate-reference \
+	validate-mockgen \
+	validate-permissions-gen \
+	validate-wrapper validate-wrapgen-testcode
 
 python-wrapper-lint:
 	$(DOCKER) run --user $(UID_GID) --rm -v $(shell pwd):/mnt -e HOME=/tmp/ -w /mnt/clients/python-wrapper $(PYTHON_IMAGE) /bin/bash -c "./pylint.sh"
@@ -343,4 +322,7 @@ help:  ## Show Help menu
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
 # helpers
-gen: gen-ui gen-api clients gen-docs
+gen: gen-ui gen-api gen-code clients gen-docs
+
+validate-clients-untracked-files:
+	scripts/verify_clients_untracked_files.sh	

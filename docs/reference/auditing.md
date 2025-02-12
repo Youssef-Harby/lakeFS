@@ -13,11 +13,11 @@ redirect_from:
 lakeFS Cloud
 {: .label .label-green }
 
-{: .note}
-> Auditing is only available for [lakeFS Cloud]({% link understand/lakefs-cloud.md %}).
+lakeFS Enterprise
+{: .label .label-purple }
 
-{: .warning }
-> Please note, as of Jan 2024, the queryable interface within the lakeFS Cloud UI has been removed in favor of direct access to lakeFS audit logs. This document now describes how to set up and query this information using [AWS Glue](https://aws.amazon.com/glue/) as a reference.
+{: .note}
+> Auditing is only available for [lakeFS Cloud]({% link cloud/index.md %}) and [lakeFS Enterprise]({% link enterprise/index.md  %}).
 
 The lakeFS audit log allows you to view all relevant user action information in a clear and organized table, including when the action was performed, by whom, and what it was they did. 
 
@@ -171,7 +171,7 @@ etl/v1/data/region=us-west-2/organization=org-acme/year=2024/month=02/day=12/hou
 ## Schema
 
 The files are in parquet format and can be accessed directly from Spark or any client that can read parquet files.
-Using Spark's [`printSchema()`](https://spark.apache.org/docs/3.1.1/api/python/reference/api/pyspark.sql.DataFrame.printSchema.html) we can inspect the values, that’s the latest schema with comments on important columns:
+Using Spark's [`printSchema()`](https://spark.apache.org/docs/3.5.2/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.printSchema.html) we can inspect the values, that’s the latest schema with comments on important columns:
 
 | column              | type   | description                                                                                                                                                                                                                         |
 |---------------------|--------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

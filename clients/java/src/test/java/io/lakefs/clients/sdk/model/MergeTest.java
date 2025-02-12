@@ -71,4 +71,20 @@ public class MergeTest {
         // TODO: test force
     }
 
+    /**
+     * Test the property 'allowEmpty'
+     */
+    @Test
+    public void allowEmptyTest() {
+        // TODO: test allowEmpty
+    }
+
+    /**
+     * Test the property 'squashMerge'
+     */
+    @Test
+    public void squashMergeTest() {
+        // TODO: test squashMerge
+    }
+
 }

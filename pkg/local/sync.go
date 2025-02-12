@@ -1,6 +1,7 @@
 package local
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,24 +18,13 @@ import (
 	"time"
 
 	"github.com/go-openapi/swag"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/treeverse/lakefs/pkg/api/apigen"
-	"github.com/treeverse/lakefs/pkg/api/apiutil"
 	"github.com/treeverse/lakefs/pkg/api/helpers"
 	"github.com/treeverse/lakefs/pkg/fileutil"
 	"github.com/treeverse/lakefs/pkg/uri"
 	"golang.org/x/sync/errgroup"
 )
-
-const (
-	DefaultDirectoryMask   = 0o755
-	ClientMtimeMetadataKey = apiutil.LakeFSMetadataPrefix + "client-mtime"
-)
-
-type SyncFlags struct {
-	Parallelism      int
-	Presign          bool
-	PresignMultipart bool
-}
 
 func getMtimeFromStats(stats apigen.ObjectStats) (int64, error) {
 	if stats.Metadata == nil {
@@ -58,18 +49,22 @@ type SyncManager struct {
 	client      *apigen.ClientWithResponses
 	httpClient  *http.Client
 	progressBar *ProgressPool
-	flags       SyncFlags
 	tasks       Tasks
+	cfg         Config
 }
 
-func NewSyncManager(ctx context.Context, client *apigen.ClientWithResponses, flags SyncFlags) *SyncManager {
-	return &SyncManager{
+func NewSyncManager(ctx context.Context, client *apigen.ClientWithResponses, httpClient *http.Client, cfg Config) *SyncManager {
+	sm := &SyncManager{
 		ctx:         ctx,
 		client:      client,
-		httpClient:  http.DefaultClient,
+		httpClient:  httpClient,
 		progressBar: NewProgressPool(),
-		flags:       flags,
+		cfg:         cfg,
 	}
+	if cfg.NoProgress {
+		sm.progressBar.pw.Style().Visibility = progress.StyleVisibility{}
+	}
+	return sm
 }
 
 // Sync - sync changes between remote and local directory given the Changes channel.
@@ -79,7 +74,7 @@ func (s *SyncManager) Sync(rootPath string, remote *uri.URI, changeSet <-chan *C
 	defer s.progressBar.Stop()
 
 	wg, ctx := errgroup.WithContext(s.ctx)
-	for i := 0; i < s.flags.Parallelism; i++ {
+	for i := 0; i < s.cfg.SyncFlags.Parallelism; i++ {
 		wg.Go(func() error {
 			for change := range changeSet {
 				if err := s.apply(ctx, rootPath, remote, change); err != nil {
@@ -91,6 +86,9 @@ func (s *SyncManager) Sync(rootPath string, remote *uri.URI, changeSet <-chan *C
 	}
 	if err := wg.Wait(); err != nil {
 		return err
+	}
+	if s.cfg.IncludePerm {
+		return nil // Do not prune directories in this case to preserve directories and permissions
 	}
 	_, err := fileutil.PruneEmptyDirectories(rootPath)
 	return err
@@ -133,41 +131,8 @@ func (s *SyncManager) apply(ctx context.Context, rootPath string, remote *uri.UR
 	return nil
 }
 
-func (s *SyncManager) download(ctx context.Context, rootPath string, remote *uri.URI, path string) error {
-	if err := fileutil.VerifyRelPath(strings.TrimPrefix(path, uri.PathSeparator), rootPath); err != nil {
-		return err
-	}
-	destination := filepath.Join(rootPath, path)
-	destinationDirectory := filepath.Dir(destination)
-	if err := os.MkdirAll(destinationDirectory, DefaultDirectoryMask); err != nil {
-		return err
-	}
-	statResp, err := s.client.StatObjectWithResponse(ctx, remote.Repository, remote.Ref, &apigen.StatObjectParams{
-		Path:         filepath.ToSlash(filepath.Join(remote.GetPath(), path)),
-		Presign:      swag.Bool(s.flags.Presign),
-		UserMetadata: swag.Bool(true),
-	})
-	if err != nil {
-		return err
-	}
-	if statResp.StatusCode() != http.StatusOK {
-		httpErr := apigen.Error{Message: "no content"}
-		_ = json.Unmarshal(statResp.Body, &httpErr)
-		return fmt.Errorf("(stat: HTTP %d, message: %s): %w", statResp.StatusCode(), httpErr.Message, ErrDownloadingFile)
-	}
-	// get mtime
-	mtimeSecs, err := getMtimeFromStats(*statResp.JSON200)
-	if err != nil {
-		return err
-	}
-
-	if strings.HasSuffix(path, uri.PathSeparator) {
-		// Directory marker - skip
-		return nil
-	}
-
-	lastModified := time.Unix(mtimeSecs, 0)
-	sizeBytes := swag.Int64Value(statResp.JSON200.SizeBytes)
+func (s *SyncManager) downloadFile(ctx context.Context, remote *uri.URI, path, destination string, objStat apigen.ObjectStats) error {
+	sizeBytes := swag.Int64Value(objStat.SizeBytes)
 	f, err := os.Create(destination)
 	if err != nil {
 		// Sometimes we get a file that is actually a directory marker (Spark loves writing those).
@@ -185,11 +150,10 @@ func (s *SyncManager) download(ctx context.Context, rootPath string, remote *uri
 		spinner := s.progressBar.AddSpinner("download " + path)
 		atomic.AddUint64(&s.tasks.Downloaded, 1)
 		defer spinner.Done()
-	} else { // Download file
-		// make request
+	} else {
 		var body io.Reader
-		if s.flags.Presign {
-			resp, err := s.httpClient.Get(statResp.JSON200.PhysicalAddress)
+		if s.cfg.SyncFlags.Presign {
+			resp, err := s.httpClient.Get(objStat.PhysicalAddress)
 			if err != nil {
 				return err
 			}
@@ -226,15 +190,91 @@ func (s *SyncManager) download(ctx context.Context, rootPath string, remote *uri
 				b.Done()
 			}
 		}()
-		_, err = io.Copy(f, barReader)
 
+		_, err = io.Copy(f, barReader)
 		if err != nil {
 			return fmt.Errorf("could not write file '%s': %w", destination, err)
 		}
 	}
+	return nil
+}
 
+func (s *SyncManager) download(ctx context.Context, rootPath string, remote *uri.URI, p string) error {
+	if err := fileutil.VerifyRelPath(strings.TrimPrefix(p, uri.PathSeparator), rootPath); err != nil {
+		return err
+	}
+
+	// In all of the below lines of code, we purposefully do not use the Join methods in order to avoid the path cleaning they perform
+	destination := filepath.ToSlash(fmt.Sprintf("%s%c%s", rootPath, filepath.Separator, p))
+	destinationDirectory := filepath.Dir(destination)
+	remotePath := filepath.ToSlash(p)
+	if remote.GetPath() != "" {
+		remotePath = fmt.Sprintf("%s%s%s", path.Clean(remote.GetPath()), uri.PathSeparator, remotePath)
+	}
+
+	// This is where we create directories (i.e. for directory markers in lakeFS) Permissions are modified later in code as needed
+	if err := os.MkdirAll(destinationDirectory, os.FileMode(DefaultDirectoryPermissions)); err != nil {
+		return err
+	}
+
+	statResp, err := s.client.StatObjectWithResponse(ctx, remote.Repository, remote.Ref, &apigen.StatObjectParams{
+		Path:         remotePath,
+		Presign:      swag.Bool(s.cfg.SyncFlags.Presign),
+		UserMetadata: swag.Bool(true),
+	})
+	if err != nil {
+		return err
+	}
+	if statResp.StatusCode() != http.StatusOK {
+		httpErr := apigen.Error{Message: "no content"}
+		_ = json.Unmarshal(statResp.Body, &httpErr)
+		return fmt.Errorf("(stat: HTTP %d, message: %s): %w", statResp.StatusCode(), httpErr.Message, ErrDownloadingFile)
+	}
+	objStat := *statResp.JSON200
+	// get mtime
+	mtimeSecs, err := getMtimeFromStats(objStat)
+	if err != nil {
+		return err
+	}
+	lastModified := time.Unix(mtimeSecs, 0)
+
+	var perm *POSIXPermissions
+	isDir := strings.HasSuffix(p, uri.PathSeparator)
+	if s.cfg.IncludePerm { // Optimization - fail on to get permissions from metadata before having to download the entire file
+		if perm, err = getPermissionFromStats(objStat, true); err != nil {
+			return err
+		}
+	} else if isDir {
+		// Directory marker - skip
+		return nil
+	}
+
+	if !isDir {
+		if err = s.downloadFile(ctx, remote, p, destination, objStat); err != nil {
+			return err
+		}
+	}
 	// set mtime to the server returned one
 	err = os.Chtimes(destination, time.Now(), lastModified) // Explicit to catch in deferred func
+	if err != nil {
+		return err
+	}
+
+	// change ownership and permissions
+	if s.cfg.IncludePerm {
+		uid := perm.UID
+		gid := perm.GID
+		if !s.cfg.IncludeUID {
+			uid = -1
+		}
+		if !s.cfg.IncludeGID {
+			gid = -1
+		}
+		if err = os.Chown(destination, uid, gid); err != nil {
+			return err
+		}
+		err = syscall.Chmod(destination, uint32(perm.Mode))
+	}
 	return err
 }
 
@@ -243,7 +283,8 @@ func (s *SyncManager) upload(ctx context.Context, rootPath string, remote *uri.U
 	if err := fileutil.VerifySafeFilename(source); err != nil {
 		return err
 	}
-	dest := filepath.ToSlash(filepath.Join(remote.GetPath(), path))
+	remotePath := strings.TrimRight(remote.GetPath(), uri.PathSeparator)
+	dest := strings.TrimPrefix(filepath.ToSlash(fmt.Sprintf("%s%s%s", remotePath, uri.PathSeparator, path)), uri.PathSeparator)
 
 	f, err := os.Open(source)
 	if err != nil {
@@ -271,18 +312,38 @@ func (s *SyncManager) upload(ctx context.Context, rootPath string, remote *uri.U
 	metadata := map[string]string{
 		ClientMtimeMetadataKey: strconv.FormatInt(fileStat.ModTime().Unix(), 10),
 	}
-	reader := fileWrapper{
+
+	readerWrapper := fileWrapper{
 		file:   f,
 		reader: b.Reader(f),
 	}
-	if s.flags.Presign {
+	if s.cfg.IncludePerm {
+		if strings.HasSuffix(path, uri.PathSeparator) { // Create a 0 byte reader for directories
+			// Use empty bytes reader for read and seek dirs
+			readerWrapper = fileWrapper{
+				file:   bytes.NewReader([]byte{}),
+				reader: bytes.NewReader([]byte{}),
+			}
+		}
+		permissions, err := getPermissionFromFileInfo(fileStat)
+		if err != nil {
+			return err
+		}
+		data, err := json.Marshal(permissions)
+		if err != nil {
+			return err
+		}
+		metadata[POSIXPermissionsMetadataKey] = string(data)
+	}
+
+	if s.cfg.SyncFlags.Presign {
 		_, err = helpers.ClientUploadPreSign(
-			ctx, s.client, remote.Repository, remote.Ref, dest, metadata, "", reader, s.flags.PresignMultipart)
+			ctx, s.client, s.httpClient, remote.Repository, remote.Ref, dest, metadata, "", readerWrapper, s.cfg.SyncFlags.PresignMultipart)
 		return err
 	}
 	// not pre-signed
 	_, err = helpers.ClientUpload(
-		ctx, s.client, remote.Repository, remote.Ref, dest, metadata, "", reader)
+		ctx, s.client, remote.Repository, remote.Ref, dest, metadata, "", readerWrapper)
 	return err
 }
 
@@ -317,6 +378,9 @@ func (s *SyncManager) deleteRemote(ctx context.Context, remote *uri.URI, change 
 		}
 	}()
 	dest := filepath.ToSlash(filepath.Join(remote.GetPath(), change.Path))
+	if strings.HasSuffix(change.Path, uri.PathSeparator) { // handle directory marker
+		dest += uri.PathSeparator
+	}
 	resp, err := s.client.DeleteObjectWithResponse(ctx, remote.Repository, remote.Ref, &apigen.DeleteObjectParams{
 		Path: dest,
 	})
@@ -324,7 +388,7 @@ func (s *SyncManager) deleteRemote(ctx context.Context, remote *uri.URI, change 
 		return
 	}
 	if resp.StatusCode() != http.StatusNoContent {
-		return fmt.Errorf("could not delete object: HTTP %d: %w", resp.StatusCode(), helpers.ErrRequestFailed)
+		return fmt.Errorf("could not delete object: HTTP %d: %w", resp.StatusCode(), helpers.ResponseAsError(resp))
 	}
 	return
 }

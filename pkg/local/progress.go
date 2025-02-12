@@ -2,7 +2,6 @@ package local
 
 import (
 	"io"
-	"os"
 	"time"
 
 	"github.com/jedib0t/go-pretty/v6/progress"
@@ -119,7 +118,7 @@ func NewProgressPool() *ProgressPool {
 	pw := progress.NewWriter()
 	pw.SetAutoStop(false) // important
 	pw.SetTrackerLength(progressTrackerLength)
-	pw.SetMessageWidth(progressTrackerWidth)
+	pw.SetMessageLength(progressTrackerWidth)
 	pw.SetSortBy(progress.SortByValue)
 	pw.SetStyle(progress.StyleDefault)
 	pw.SetTrackerPosition(progress.PositionRight)
@@ -134,7 +133,7 @@ func NewProgressPool() *ProgressPool {
 }
 
 type fileWrapper struct {
-	file   *os.File
+	file   io.Seeker
 	reader io.Reader
 }
 
@@ -144,4 +143,8 @@ func (f fileWrapper) Read(p []byte) (n int, err error) {
 
 func (f fileWrapper) Seek(offset int64, whence int) (int64, error) {
 	return f.file.Seek(offset, whence)
+}
+
+func (f fileWrapper) Close() error {
+	return nil
 }

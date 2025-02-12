@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/deepmap/oapi-codegen/pkg/securityprovider"
-	"github.com/go-openapi/swag"
 	"github.com/spf13/viper"
 	"github.com/treeverse/lakefs/pkg/actions"
 	"github.com/treeverse/lakefs/pkg/api"
@@ -28,7 +27,6 @@ import (
 	"github.com/treeverse/lakefs/pkg/catalog"
 	"github.com/treeverse/lakefs/pkg/config"
 	"github.com/treeverse/lakefs/pkg/graveler/settings"
-	"github.com/treeverse/lakefs/pkg/ingest/store"
 	"github.com/treeverse/lakefs/pkg/kv"
 	"github.com/treeverse/lakefs/pkg/kv/kvparams"
 	"github.com/treeverse/lakefs/pkg/kv/kvtest"
@@ -101,33 +99,7 @@ func createDefaultAdminUser(t testing.TB, clt apigen.ClientWithResponsesInterfac
 	}
 }
 
-func createUserWithDefaultGroup(t testing.TB, clt apigen.ClientWithResponsesInterface) *authmodel.BaseCredential {
-	t.Helper()
-	// create the user
-	createUsrRes, err := clt.CreateUserWithResponse(context.Background(), apigen.CreateUserJSONRequestBody{
-		Id:         "test@example.com",
-		InviteUser: swag.Bool(false),
-	})
-	testutil.Must(t, err)
-	if createUsrRes.JSON201 == nil {
-		t.Fatal("Failed to create user", createUsrRes.HTTPResponse.StatusCode, createUsrRes.HTTPResponse.Status)
-	}
-
-	// create credentials for the user
-	createCredsRes, err := clt.CreateCredentialsWithResponse(context.Background(), createUsrRes.JSON201.Id)
-	testutil.Must(t, err)
-	if createCredsRes.JSON201 == nil {
-		t.Fatal("Failed to create credentials", createCredsRes.HTTPResponse.StatusCode, createCredsRes.HTTPResponse.Status)
-	}
-
-	return &authmodel.BaseCredential{
-		IssuedDate:      time.Unix(createCredsRes.JSON201.CreationDate, 0),
-		AccessKeyID:     createCredsRes.JSON201.AccessKeyId,
-		SecretAccessKey: createCredsRes.JSON201.SecretAccessKey,
-	}
-}
-
-func setupHandlerWithWalkerFactory(t testing.TB, factory catalog.WalkerFactory) (http.Handler, *dependencies) {
+func setupHandler(t testing.TB) (http.Handler, *dependencies) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -135,26 +107,25 @@ func setupHandlerWithWalkerFactory(t testing.TB, factory catalog.WalkerFactory) 
 		viper.Set(config.BlockstoreTypeKey, block.BlockstoreTypeMem)
 	}
 	viper.Set("database.type", mem.DriverName)
-	// Use 'internal' mode in order to have access to policies
-	viper.Set("auth.ui_config.rbac", config.AuthRBACInternal)
+	// Add endpoint so that 'IsAdvancedAuth' will be in effect
+	viper.Set("auth.api.endpoint", config.DefaultListenAddress)
 
 	collector := &memCollector{}
-
-	cfg, err := config.NewConfig("")
+	cfg := &config.BaseConfig{}
+	cfg, err := config.NewConfig("", cfg)
 	testutil.MustDo(t, "config", err)
 	kvStore := kvtest.GetStore(ctx, t)
 	actionsStore := actions.NewActionsKVStore(kvStore)
 	idGen := &actions.DecreasingIDGenerator{}
-	authService := auth.NewAuthService(kvStore, crypt.NewSecretStore([]byte("some secret")), authparams.ServiceCache{
+	authService := auth.NewBasicAuthService(kvStore, crypt.NewSecretStore([]byte("some secret")), authparams.ServiceCache{
 		Enabled: false,
-	}, logging.ContextUnavailable())
+	}, logging.FromContext(ctx))
 	meta := auth.NewKVMetadataManager("serve_test", cfg.Installation.FixedID, cfg.Database.Type, kvStore)
 
 	// Do not validate invalid config (missing required fields).
 	c, err := catalog.New(ctx, catalog.Config{
 		Config:                cfg,
 		KVStore:               kvStore,
-		WalkerFactory:         factory,
 		SettingsManagerOption: settings.WithCache(cache.NoCache),
 		PathProvider:          upload.DefaultPathProvider,
 	})
@@ -177,7 +148,7 @@ func setupHandlerWithWalkerFactory(t testing.TB, factory catalog.WalkerFactory) 
 	c.SetHooksHandler(actionsService)
 
 	authenticator := auth.NewBuiltinAuthenticator(authService)
-	kvParams, err := kvparams.NewConfig(cfg)
+	kvParams, err := kvparams.NewConfig(&cfg.Database)
 	testutil.Must(t, err)
 	migrator := kv.NewDatabaseMigrator(kvParams)
 
@@ -197,10 +168,6 @@ func setupHandlerWithWalkerFactory(t testing.TB, factory catalog.WalkerFactory) 
 		catalog:     c,
 		collector:   collector,
 	}
-}
-
-func setupHandler(t testing.TB) (http.Handler, *dependencies) {
-	return setupHandlerWithWalkerFactory(t, store.NewFactory(nil))
 }
 
 func setupClientByEndpoint(t testing.TB, endpointURL string, accessKeyID, secretAccessKey string, opts ...apigen.ClientOption) apigen.ClientWithResponsesInterface {
@@ -244,12 +211,7 @@ func shouldUseServerTimeout() bool {
 
 func setupClientWithAdmin(t testing.TB) (apigen.ClientWithResponsesInterface, *dependencies) {
 	t.Helper()
-	return setupClientWithAdminAndWalkerFactory(t, store.NewFactory(nil))
-}
-
-func setupClientWithAdminAndWalkerFactory(t testing.TB, factory catalog.WalkerFactory) (apigen.ClientWithResponsesInterface, *dependencies) {
-	t.Helper()
-	handler, deps := setupHandlerWithWalkerFactory(t, factory)
+	handler, deps := setupHandler(t)
 	server := setupServer(t, handler)
 	deps.server = server
 	clt := setupClientByEndpoint(t, server.URL, "", "")

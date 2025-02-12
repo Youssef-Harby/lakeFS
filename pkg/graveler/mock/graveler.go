@@ -139,21 +139,6 @@ func (mr *MockKeyValueStoreMockRecorder) List(ctx, repository, ref, batchSize in
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "List", reflect.TypeOf((*MockKeyValueStore)(nil).List), ctx, repository, ref, batchSize)
 }
 
-// ListStaging mocks base method.
-func (m *MockKeyValueStore) ListStaging(ctx context.Context, branch *graveler.Branch, batchSize int) (graveler.ValueIterator, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListStaging", ctx, branch, batchSize)
-	ret0, _ := ret[0].(graveler.ValueIterator)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ListStaging indicates an expected call of ListStaging.
-func (mr *MockKeyValueStoreMockRecorder) ListStaging(ctx, branch, batchSize interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListStaging", reflect.TypeOf((*MockKeyValueStore)(nil).ListStaging), ctx, branch, batchSize)
-}
-
 // Set mocks base method.
 func (m *MockKeyValueStore) Set(ctx context.Context, repository *graveler.RepositoryRecord, branchID graveler.BranchID, key graveler.Key, value graveler.Value, opts ...graveler.SetOptionsFunc) error {
 	m.ctrl.T.Helper()
@@ -171,6 +156,25 @@ func (mr *MockKeyValueStoreMockRecorder) Set(ctx, repository, branchID, key, val
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{ctx, repository, branchID, key, value}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockKeyValueStore)(nil).Set), varargs...)
+}
+
+// Update mocks base method.
+func (m *MockKeyValueStore) Update(ctx context.Context, repository *graveler.RepositoryRecord, branchID graveler.BranchID, key graveler.Key, update graveler.ValueUpdateFunc, opts ...graveler.SetOptionsFunc) error {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{ctx, repository, branchID, key, update}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Update", varargs...)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Update indicates an expected call of Update.
+func (mr *MockKeyValueStoreMockRecorder) Update(ctx, repository, branchID, key, update interface{}, opts ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{ctx, repository, branchID, key, update}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Update", reflect.TypeOf((*MockKeyValueStore)(nil).Update), varargs...)
 }
 
 // MockVersionController is a mock of VersionController interface.
@@ -217,9 +221,9 @@ func (mr *MockVersionControllerMockRecorder) AddCommit(ctx, repository, commit i
 }
 
 // CherryPick mocks base method.
-func (m *MockVersionController) CherryPick(ctx context.Context, repository *graveler.RepositoryRecord, id graveler.BranchID, reference graveler.Ref, number *int, committer string, opts ...graveler.SetOptionsFunc) (graveler.CommitID, error) {
+func (m *MockVersionController) CherryPick(ctx context.Context, repository *graveler.RepositoryRecord, id graveler.BranchID, reference graveler.Ref, number *int, committer string, commitOverrides *graveler.CommitOverrides, opts ...graveler.SetOptionsFunc) (graveler.CommitID, error) {
 	m.ctrl.T.Helper()
-	varargs := []interface{}{ctx, repository, id, reference, number, committer}
+	varargs := []interface{}{ctx, repository, id, reference, number, committer, commitOverrides}
 	for _, a := range opts {
 		varargs = append(varargs, a)
 	}
@@ -230,9 +234,9 @@ func (m *MockVersionController) CherryPick(ctx context.Context, repository *grav
 }
 
 // CherryPick indicates an expected call of CherryPick.
-func (mr *MockVersionControllerMockRecorder) CherryPick(ctx, repository, id, reference, number, committer interface{}, opts ...interface{}) *gomock.Call {
+func (mr *MockVersionControllerMockRecorder) CherryPick(ctx, repository, id, reference, number, committer, commitOverrides interface{}, opts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	varargs := append([]interface{}{ctx, repository, id, reference, number, committer}, opts...)
+	varargs := append([]interface{}{ctx, repository, id, reference, number, committer, commitOverrides}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CherryPick", reflect.TypeOf((*MockVersionController)(nil).CherryPick), varargs...)
 }
 
@@ -272,18 +276,18 @@ func (mr *MockVersionControllerMockRecorder) Compare(ctx, repository, left, righ
 }
 
 // CreateBareRepository mocks base method.
-func (m *MockVersionController) CreateBareRepository(ctx context.Context, repositoryID graveler.RepositoryID, storageNamespace graveler.StorageNamespace, defaultBranchID graveler.BranchID, readOnly bool) (*graveler.RepositoryRecord, error) {
+func (m *MockVersionController) CreateBareRepository(ctx context.Context, repositoryID graveler.RepositoryID, storageID graveler.StorageID, storageNamespace graveler.StorageNamespace, defaultBranchID graveler.BranchID, readOnly bool) (*graveler.RepositoryRecord, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreateBareRepository", ctx, repositoryID, storageNamespace, defaultBranchID, readOnly)
+	ret := m.ctrl.Call(m, "CreateBareRepository", ctx, repositoryID, storageID, storageNamespace, defaultBranchID, readOnly)
 	ret0, _ := ret[0].(*graveler.RepositoryRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // CreateBareRepository indicates an expected call of CreateBareRepository.
-func (mr *MockVersionControllerMockRecorder) CreateBareRepository(ctx, repositoryID, storageNamespace, defaultBranchID, readOnly interface{}) *gomock.Call {
+func (mr *MockVersionControllerMockRecorder) CreateBareRepository(ctx, repositoryID, storageID, storageNamespace, defaultBranchID, readOnly interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateBareRepository", reflect.TypeOf((*MockVersionController)(nil).CreateBareRepository), ctx, repositoryID, storageNamespace, defaultBranchID, readOnly)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateBareRepository", reflect.TypeOf((*MockVersionController)(nil).CreateBareRepository), ctx, repositoryID, storageID, storageNamespace, defaultBranchID, readOnly)
 }
 
 // CreateBranch mocks base method.
@@ -326,18 +330,18 @@ func (mr *MockVersionControllerMockRecorder) CreateCommitRecord(ctx, repository,
 }
 
 // CreateRepository mocks base method.
-func (m *MockVersionController) CreateRepository(ctx context.Context, repositoryID graveler.RepositoryID, storageNamespace graveler.StorageNamespace, branchID graveler.BranchID, readOnly bool) (*graveler.RepositoryRecord, error) {
+func (m *MockVersionController) CreateRepository(ctx context.Context, repositoryID graveler.RepositoryID, storageID graveler.StorageID, storageNamespace graveler.StorageNamespace, branchID graveler.BranchID, readOnly bool) (*graveler.RepositoryRecord, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreateRepository", ctx, repositoryID, storageNamespace, branchID, readOnly)
+	ret := m.ctrl.Call(m, "CreateRepository", ctx, repositoryID, storageID, storageNamespace, branchID, readOnly)
 	ret0, _ := ret[0].(*graveler.RepositoryRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // CreateRepository indicates an expected call of CreateRepository.
-func (mr *MockVersionControllerMockRecorder) CreateRepository(ctx, repositoryID, storageNamespace, branchID, readOnly interface{}) *gomock.Call {
+func (mr *MockVersionControllerMockRecorder) CreateRepository(ctx, repositoryID, storageID, storageNamespace, branchID, readOnly interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateRepository", reflect.TypeOf((*MockVersionController)(nil).CreateRepository), ctx, repositoryID, storageNamespace, branchID, readOnly)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateRepository", reflect.TypeOf((*MockVersionController)(nil).CreateRepository), ctx, repositoryID, storageID, storageNamespace, branchID, readOnly)
 }
 
 // CreateTag mocks base method.
@@ -663,18 +667,23 @@ func (mr *MockVersionControllerMockRecorder) Import(ctx, repository, destination
 }
 
 // ListBranches mocks base method.
-func (m *MockVersionController) ListBranches(ctx context.Context, repository *graveler.RepositoryRecord) (graveler.BranchIterator, error) {
+func (m *MockVersionController) ListBranches(ctx context.Context, repository *graveler.RepositoryRecord, opts ...graveler.ListOptionsFunc) (graveler.BranchIterator, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListBranches", ctx, repository)
+	varargs := []interface{}{ctx, repository}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "ListBranches", varargs...)
 	ret0, _ := ret[0].(graveler.BranchIterator)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ListBranches indicates an expected call of ListBranches.
-func (mr *MockVersionControllerMockRecorder) ListBranches(ctx, repository interface{}) *gomock.Call {
+func (mr *MockVersionControllerMockRecorder) ListBranches(ctx, repository interface{}, opts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListBranches", reflect.TypeOf((*MockVersionController)(nil).ListBranches), ctx, repository)
+	varargs := append([]interface{}{ctx, repository}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListBranches", reflect.TypeOf((*MockVersionController)(nil).ListBranches), varargs...)
 }
 
 // ListRepositories mocks base method.
@@ -849,9 +858,9 @@ func (mr *MockVersionControllerMockRecorder) ResolveRawRef(ctx, repository, rawR
 }
 
 // Revert mocks base method.
-func (m *MockVersionController) Revert(ctx context.Context, repository *graveler.RepositoryRecord, branchID graveler.BranchID, ref graveler.Ref, parentNumber int, commitParams graveler.CommitParams, opts ...graveler.SetOptionsFunc) (graveler.CommitID, error) {
+func (m *MockVersionController) Revert(ctx context.Context, repository *graveler.RepositoryRecord, branchID graveler.BranchID, ref graveler.Ref, parentNumber int, commitParams graveler.CommitParams, commitOverrides *graveler.CommitOverrides, opts ...graveler.SetOptionsFunc) (graveler.CommitID, error) {
 	m.ctrl.T.Helper()
-	varargs := []interface{}{ctx, repository, branchID, ref, parentNumber, commitParams}
+	varargs := []interface{}{ctx, repository, branchID, ref, parentNumber, commitParams, commitOverrides}
 	for _, a := range opts {
 		varargs = append(varargs, a)
 	}
@@ -862,9 +871,9 @@ func (m *MockVersionController) Revert(ctx context.Context, repository *graveler
 }
 
 // Revert indicates an expected call of Revert.
-func (mr *MockVersionControllerMockRecorder) Revert(ctx, repository, branchID, ref, parentNumber, commitParams interface{}, opts ...interface{}) *gomock.Call {
+func (mr *MockVersionControllerMockRecorder) Revert(ctx, repository, branchID, ref, parentNumber, commitParams, commitOverrides interface{}, opts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	varargs := append([]interface{}{ctx, repository, branchID, ref, parentNumber, commitParams}, opts...)
+	varargs := append([]interface{}{ctx, repository, branchID, ref, parentNumber, commitParams, commitOverrides}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Revert", reflect.TypeOf((*MockVersionController)(nil).Revert), varargs...)
 }
 
@@ -1230,6 +1239,87 @@ func (mr *MockLoaderMockRecorder) LoadTags(ctx, repository, metaRangeID interfac
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{ctx, repository, metaRangeID}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadTags", reflect.TypeOf((*MockLoader)(nil).LoadTags), varargs...)
+}
+
+// MockCollaborator is a mock of Collaborator interface.
+type MockCollaborator struct {
+	ctrl     *gomock.Controller
+	recorder *MockCollaboratorMockRecorder
+}
+
+// MockCollaboratorMockRecorder is the mock recorder for MockCollaborator.
+type MockCollaboratorMockRecorder struct {
+	mock *MockCollaborator
+}
+
+// NewMockCollaborator creates a new mock instance.
+func NewMockCollaborator(ctrl *gomock.Controller) *MockCollaborator {
+	mock := &MockCollaborator{ctrl: ctrl}
+	mock.recorder = &MockCollaboratorMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockCollaborator) EXPECT() *MockCollaboratorMockRecorder {
+	return m.recorder
+}
+
+// CreatePullRequest mocks base method.
+func (m *MockCollaborator) CreatePullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequest *graveler.PullRequestRecord) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreatePullRequest", ctx, repository, pullRequest)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// CreatePullRequest indicates an expected call of CreatePullRequest.
+func (mr *MockCollaboratorMockRecorder) CreatePullRequest(ctx, repository, pullRequest interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePullRequest", reflect.TypeOf((*MockCollaborator)(nil).CreatePullRequest), ctx, repository, pullRequest)
+}
+
+// GetPullRequest mocks base method.
+func (m *MockCollaborator) GetPullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequestID graveler.PullRequestID) (*graveler.PullRequest, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetPullRequest", ctx, repository, pullRequestID)
+	ret0, _ := ret[0].(*graveler.PullRequest)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetPullRequest indicates an expected call of GetPullRequest.
+func (mr *MockCollaboratorMockRecorder) GetPullRequest(ctx, repository, pullRequestID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPullRequest", reflect.TypeOf((*MockCollaborator)(nil).GetPullRequest), ctx, repository, pullRequestID)
+}
+
+// ListPullRequests mocks base method.
+func (m *MockCollaborator) ListPullRequests(ctx context.Context, repository *graveler.RepositoryRecord) (graveler.PullsIterator, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListPullRequests", ctx, repository)
+	ret0, _ := ret[0].(graveler.PullsIterator)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListPullRequests indicates an expected call of ListPullRequests.
+func (mr *MockCollaboratorMockRecorder) ListPullRequests(ctx, repository interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPullRequests", reflect.TypeOf((*MockCollaborator)(nil).ListPullRequests), ctx, repository)
+}
+
+// UpdatePullRequest mocks base method.
+func (m *MockCollaborator) UpdatePullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequestID graveler.PullRequestID, update *graveler.UpdatePullRequest) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdatePullRequest", ctx, repository, pullRequestID, update)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdatePullRequest indicates an expected call of UpdatePullRequest.
+func (mr *MockCollaboratorMockRecorder) UpdatePullRequest(ctx, repository, pullRequestID, update interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePullRequest", reflect.TypeOf((*MockCollaborator)(nil).UpdatePullRequest), ctx, repository, pullRequestID, update)
 }
 
 // MockRepositoryIterator is a mock of RepositoryIterator interface.
@@ -1855,6 +1945,95 @@ func (mr *MockLinkAddressIteratorMockRecorder) Value() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Value", reflect.TypeOf((*MockLinkAddressIterator)(nil).Value))
 }
 
+// MockPullsIterator is a mock of PullsIterator interface.
+type MockPullsIterator struct {
+	ctrl     *gomock.Controller
+	recorder *MockPullsIteratorMockRecorder
+}
+
+// MockPullsIteratorMockRecorder is the mock recorder for MockPullsIterator.
+type MockPullsIteratorMockRecorder struct {
+	mock *MockPullsIterator
+}
+
+// NewMockPullsIterator creates a new mock instance.
+func NewMockPullsIterator(ctrl *gomock.Controller) *MockPullsIterator {
+	mock := &MockPullsIterator{ctrl: ctrl}
+	mock.recorder = &MockPullsIteratorMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockPullsIterator) EXPECT() *MockPullsIteratorMockRecorder {
+	return m.recorder
+}
+
+// Close mocks base method.
+func (m *MockPullsIterator) Close() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Close")
+}
+
+// Close indicates an expected call of Close.
+func (mr *MockPullsIteratorMockRecorder) Close() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockPullsIterator)(nil).Close))
+}
+
+// Err mocks base method.
+func (m *MockPullsIterator) Err() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Err")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Err indicates an expected call of Err.
+func (mr *MockPullsIteratorMockRecorder) Err() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Err", reflect.TypeOf((*MockPullsIterator)(nil).Err))
+}
+
+// Next mocks base method.
+func (m *MockPullsIterator) Next() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Next")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// Next indicates an expected call of Next.
+func (mr *MockPullsIteratorMockRecorder) Next() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Next", reflect.TypeOf((*MockPullsIterator)(nil).Next))
+}
+
+// SeekGE mocks base method.
+func (m *MockPullsIterator) SeekGE(id graveler.PullRequestID) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SeekGE", id)
+}
+
+// SeekGE indicates an expected call of SeekGE.
+func (mr *MockPullsIteratorMockRecorder) SeekGE(id interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SeekGE", reflect.TypeOf((*MockPullsIterator)(nil).SeekGE), id)
+}
+
+// Value mocks base method.
+func (m *MockPullsIterator) Value() *graveler.PullRequestRecord {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Value")
+	ret0, _ := ret[0].(*graveler.PullRequestRecord)
+	return ret0
+}
+
+// Value indicates an expected call of Value.
+func (mr *MockPullsIteratorMockRecorder) Value() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Value", reflect.TypeOf((*MockPullsIterator)(nil).Value))
+}
+
 // MockRefManager is a mock of RefManager interface.
 type MockRefManager struct {
 	ctrl     *gomock.Controller
@@ -1950,6 +2129,20 @@ func (mr *MockRefManagerMockRecorder) CreateCommitRecord(ctx, repository, commit
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateCommitRecord", reflect.TypeOf((*MockRefManager)(nil).CreateCommitRecord), ctx, repository, commitID, commit)
 }
 
+// CreatePullRequest mocks base method.
+func (m *MockRefManager) CreatePullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequestID graveler.PullRequestID, pullRequest *graveler.PullRequest) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreatePullRequest", ctx, repository, pullRequestID, pullRequest)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// CreatePullRequest indicates an expected call of CreatePullRequest.
+func (mr *MockRefManagerMockRecorder) CreatePullRequest(ctx, repository, pullRequestID, pullRequest interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePullRequest", reflect.TypeOf((*MockRefManager)(nil).CreatePullRequest), ctx, repository, pullRequestID, pullRequest)
+}
+
 // CreateRepository mocks base method.
 func (m *MockRefManager) CreateRepository(ctx context.Context, repositoryID graveler.RepositoryID, repository graveler.Repository) (*graveler.RepositoryRecord, error) {
 	m.ctrl.T.Helper()
@@ -2005,6 +2198,20 @@ func (m *MockRefManager) DeleteExpiredImports(ctx context.Context, repository *g
 func (mr *MockRefManagerMockRecorder) DeleteExpiredImports(ctx, repository interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteExpiredImports", reflect.TypeOf((*MockRefManager)(nil).DeleteExpiredImports), ctx, repository)
+}
+
+// DeletePullRequest mocks base method.
+func (m *MockRefManager) DeletePullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequestID graveler.PullRequestID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeletePullRequest", ctx, repository, pullRequestID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeletePullRequest indicates an expected call of DeletePullRequest.
+func (mr *MockRefManagerMockRecorder) DeletePullRequest(ctx, repository, pullRequestID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePullRequest", reflect.TypeOf((*MockRefManager)(nil).DeletePullRequest), ctx, repository, pullRequestID)
 }
 
 // DeleteRepository mocks base method.
@@ -2135,6 +2342,21 @@ func (mr *MockRefManagerMockRecorder) GetCommitByPrefix(ctx, repository, prefix 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetCommitByPrefix", reflect.TypeOf((*MockRefManager)(nil).GetCommitByPrefix), ctx, repository, prefix)
 }
 
+// GetPullRequest mocks base method.
+func (m *MockRefManager) GetPullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullID graveler.PullRequestID) (*graveler.PullRequest, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetPullRequest", ctx, repository, pullID)
+	ret0, _ := ret[0].(*graveler.PullRequest)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetPullRequest indicates an expected call of GetPullRequest.
+func (mr *MockRefManagerMockRecorder) GetPullRequest(ctx, repository, pullID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPullRequest", reflect.TypeOf((*MockRefManager)(nil).GetPullRequest), ctx, repository, pullID)
+}
+
 // GetRepository mocks base method.
 func (m *MockRefManager) GetRepository(ctx context.Context, repositoryID graveler.RepositoryID) (*graveler.RepositoryRecord, error) {
 	m.ctrl.T.Helper()
@@ -2181,18 +2403,18 @@ func (mr *MockRefManagerMockRecorder) GetTag(ctx, repository, tagID interface{})
 }
 
 // ListBranches mocks base method.
-func (m *MockRefManager) ListBranches(ctx context.Context, repository *graveler.RepositoryRecord) (graveler.BranchIterator, error) {
+func (m *MockRefManager) ListBranches(ctx context.Context, repository *graveler.RepositoryRecord, opts graveler.ListOptions) (graveler.BranchIterator, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListBranches", ctx, repository)
+	ret := m.ctrl.Call(m, "ListBranches", ctx, repository, opts)
 	ret0, _ := ret[0].(graveler.BranchIterator)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ListBranches indicates an expected call of ListBranches.
-func (mr *MockRefManagerMockRecorder) ListBranches(ctx, repository interface{}) *gomock.Call {
+func (mr *MockRefManagerMockRecorder) ListBranches(ctx, repository, opts interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListBranches", reflect.TypeOf((*MockRefManager)(nil).ListBranches), ctx, repository)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListBranches", reflect.TypeOf((*MockRefManager)(nil).ListBranches), ctx, repository, opts)
 }
 
 // ListCommits mocks base method.
@@ -2208,6 +2430,21 @@ func (m *MockRefManager) ListCommits(ctx context.Context, repository *graveler.R
 func (mr *MockRefManagerMockRecorder) ListCommits(ctx, repository interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListCommits", reflect.TypeOf((*MockRefManager)(nil).ListCommits), ctx, repository)
+}
+
+// ListPullRequests mocks base method.
+func (m *MockRefManager) ListPullRequests(ctx context.Context, repository *graveler.RepositoryRecord) (graveler.PullsIterator, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListPullRequests", ctx, repository)
+	ret0, _ := ret[0].(graveler.PullsIterator)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListPullRequests indicates an expected call of ListPullRequests.
+func (mr *MockRefManagerMockRecorder) ListPullRequests(ctx, repository interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPullRequests", reflect.TypeOf((*MockRefManager)(nil).ListPullRequests), ctx, repository)
 }
 
 // ListRepositories mocks base method.
@@ -2327,6 +2564,20 @@ func (mr *MockRefManagerMockRecorder) SetRepositoryMetadata(ctx, repository, upd
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRepositoryMetadata", reflect.TypeOf((*MockRefManager)(nil).SetRepositoryMetadata), ctx, repository, updateFunc)
 }
 
+// UpdatePullRequest mocks base method.
+func (m *MockRefManager) UpdatePullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequestID graveler.PullRequestID, f graveler.PullUpdateFunc) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdatePullRequest", ctx, repository, pullRequestID, f)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdatePullRequest indicates an expected call of UpdatePullRequest.
+func (mr *MockRefManagerMockRecorder) UpdatePullRequest(ctx, repository, pullRequestID, f interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePullRequest", reflect.TypeOf((*MockRefManager)(nil).UpdatePullRequest), ctx, repository, pullRequestID, f)
+}
+
 // MockCommittedManager is a mock of CommittedManager interface.
 type MockCommittedManager struct {
 	ctrl     *gomock.Controller
@@ -2351,9 +2602,9 @@ func (m *MockCommittedManager) EXPECT() *MockCommittedManagerMockRecorder {
 }
 
 // Commit mocks base method.
-func (m *MockCommittedManager) Commit(ctx context.Context, ns graveler.StorageNamespace, baseMetaRangeID graveler.MetaRangeID, changes graveler.ValueIterator, allowEmpty bool, opts ...graveler.SetOptionsFunc) (graveler.MetaRangeID, graveler.DiffSummary, error) {
+func (m *MockCommittedManager) Commit(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, baseMetaRangeID graveler.MetaRangeID, changes graveler.ValueIterator, allowEmpty bool, opts ...graveler.SetOptionsFunc) (graveler.MetaRangeID, graveler.DiffSummary, error) {
 	m.ctrl.T.Helper()
-	varargs := []interface{}{ctx, ns, baseMetaRangeID, changes, allowEmpty}
+	varargs := []interface{}{ctx, storageID, ns, baseMetaRangeID, changes, allowEmpty}
 	for _, a := range opts {
 		varargs = append(varargs, a)
 	}
@@ -2365,70 +2616,70 @@ func (m *MockCommittedManager) Commit(ctx context.Context, ns graveler.StorageNa
 }
 
 // Commit indicates an expected call of Commit.
-func (mr *MockCommittedManagerMockRecorder) Commit(ctx, ns, baseMetaRangeID, changes, allowEmpty interface{}, opts ...interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) Commit(ctx, storageID, ns, baseMetaRangeID, changes, allowEmpty interface{}, opts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	varargs := append([]interface{}{ctx, ns, baseMetaRangeID, changes, allowEmpty}, opts...)
+	varargs := append([]interface{}{ctx, storageID, ns, baseMetaRangeID, changes, allowEmpty}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Commit", reflect.TypeOf((*MockCommittedManager)(nil).Commit), varargs...)
 }
 
 // Compare mocks base method.
-func (m *MockCommittedManager) Compare(ctx context.Context, ns graveler.StorageNamespace, destination, source, base graveler.MetaRangeID) (graveler.DiffIterator, error) {
+func (m *MockCommittedManager) Compare(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, destination, source, base graveler.MetaRangeID) (graveler.DiffIterator, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Compare", ctx, ns, destination, source, base)
+	ret := m.ctrl.Call(m, "Compare", ctx, storageID, ns, destination, source, base)
 	ret0, _ := ret[0].(graveler.DiffIterator)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Compare indicates an expected call of Compare.
-func (mr *MockCommittedManagerMockRecorder) Compare(ctx, ns, destination, source, base interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) Compare(ctx, storageID, ns, destination, source, base interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Compare", reflect.TypeOf((*MockCommittedManager)(nil).Compare), ctx, ns, destination, source, base)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Compare", reflect.TypeOf((*MockCommittedManager)(nil).Compare), ctx, storageID, ns, destination, source, base)
 }
 
 // Diff mocks base method.
-func (m *MockCommittedManager) Diff(ctx context.Context, ns graveler.StorageNamespace, left, right graveler.MetaRangeID) (graveler.DiffIterator, error) {
+func (m *MockCommittedManager) Diff(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, left, right graveler.MetaRangeID) (graveler.DiffIterator, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Diff", ctx, ns, left, right)
+	ret := m.ctrl.Call(m, "Diff", ctx, storageID, ns, left, right)
 	ret0, _ := ret[0].(graveler.DiffIterator)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Diff indicates an expected call of Diff.
-func (mr *MockCommittedManagerMockRecorder) Diff(ctx, ns, left, right interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) Diff(ctx, storageID, ns, left, right interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Diff", reflect.TypeOf((*MockCommittedManager)(nil).Diff), ctx, ns, left, right)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Diff", reflect.TypeOf((*MockCommittedManager)(nil).Diff), ctx, storageID, ns, left, right)
 }
 
 // Exists mocks base method.
-func (m *MockCommittedManager) Exists(ctx context.Context, ns graveler.StorageNamespace, id graveler.MetaRangeID) (bool, error) {
+func (m *MockCommittedManager) Exists(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, id graveler.MetaRangeID) (bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Exists", ctx, ns, id)
+	ret := m.ctrl.Call(m, "Exists", ctx, storageID, ns, id)
 	ret0, _ := ret[0].(bool)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Exists indicates an expected call of Exists.
-func (mr *MockCommittedManagerMockRecorder) Exists(ctx, ns, id interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) Exists(ctx, storageID, ns, id interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Exists", reflect.TypeOf((*MockCommittedManager)(nil).Exists), ctx, ns, id)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Exists", reflect.TypeOf((*MockCommittedManager)(nil).Exists), ctx, storageID, ns, id)
 }
 
 // Get mocks base method.
-func (m *MockCommittedManager) Get(ctx context.Context, ns graveler.StorageNamespace, rangeID graveler.MetaRangeID, key graveler.Key) (*graveler.Value, error) {
+func (m *MockCommittedManager) Get(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, rangeID graveler.MetaRangeID, key graveler.Key) (*graveler.Value, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Get", ctx, ns, rangeID, key)
+	ret := m.ctrl.Call(m, "Get", ctx, storageID, ns, rangeID, key)
 	ret0, _ := ret[0].(*graveler.Value)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Get indicates an expected call of Get.
-func (mr *MockCommittedManagerMockRecorder) Get(ctx, ns, rangeID, key interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) Get(ctx, storageID, ns, rangeID, key interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockCommittedManager)(nil).Get), ctx, ns, rangeID, key)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockCommittedManager)(nil).Get), ctx, storageID, ns, rangeID, key)
 }
 
 // GetMetaRange mocks base method.
@@ -2462,24 +2713,24 @@ func (mr *MockCommittedManagerMockRecorder) GetRange(ctx, ns, rangeID interface{
 }
 
 // GetRangeIDByKey mocks base method.
-func (m *MockCommittedManager) GetRangeIDByKey(ctx context.Context, ns graveler.StorageNamespace, id graveler.MetaRangeID, key graveler.Key) (graveler.RangeID, error) {
+func (m *MockCommittedManager) GetRangeIDByKey(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, id graveler.MetaRangeID, key graveler.Key) (graveler.RangeID, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetRangeIDByKey", ctx, ns, id, key)
+	ret := m.ctrl.Call(m, "GetRangeIDByKey", ctx, storageID, ns, id, key)
 	ret0, _ := ret[0].(graveler.RangeID)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetRangeIDByKey indicates an expected call of GetRangeIDByKey.
-func (mr *MockCommittedManagerMockRecorder) GetRangeIDByKey(ctx, ns, id, key interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) GetRangeIDByKey(ctx, storageID, ns, id, key interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRangeIDByKey", reflect.TypeOf((*MockCommittedManager)(nil).GetRangeIDByKey), ctx, ns, id, key)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRangeIDByKey", reflect.TypeOf((*MockCommittedManager)(nil).GetRangeIDByKey), ctx, storageID, ns, id, key)
 }
 
 // Import mocks base method.
-func (m *MockCommittedManager) Import(ctx context.Context, ns graveler.StorageNamespace, destination, source graveler.MetaRangeID, prefixes []graveler.Prefix, opts ...graveler.SetOptionsFunc) (graveler.MetaRangeID, error) {
+func (m *MockCommittedManager) Import(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, destination, source graveler.MetaRangeID, prefixes []graveler.Prefix, opts ...graveler.SetOptionsFunc) (graveler.MetaRangeID, error) {
 	m.ctrl.T.Helper()
-	varargs := []interface{}{ctx, ns, destination, source, prefixes}
+	varargs := []interface{}{ctx, storageID, ns, destination, source, prefixes}
 	for _, a := range opts {
 		varargs = append(varargs, a)
 	}
@@ -2490,25 +2741,25 @@ func (m *MockCommittedManager) Import(ctx context.Context, ns graveler.StorageNa
 }
 
 // Import indicates an expected call of Import.
-func (mr *MockCommittedManagerMockRecorder) Import(ctx, ns, destination, source, prefixes interface{}, opts ...interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) Import(ctx, storageID, ns, destination, source, prefixes interface{}, opts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	varargs := append([]interface{}{ctx, ns, destination, source, prefixes}, opts...)
+	varargs := append([]interface{}{ctx, storageID, ns, destination, source, prefixes}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Import", reflect.TypeOf((*MockCommittedManager)(nil).Import), varargs...)
 }
 
 // List mocks base method.
-func (m *MockCommittedManager) List(ctx context.Context, ns graveler.StorageNamespace, rangeID graveler.MetaRangeID) (graveler.ValueIterator, error) {
+func (m *MockCommittedManager) List(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, rangeID graveler.MetaRangeID) (graveler.ValueIterator, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "List", ctx, ns, rangeID)
+	ret := m.ctrl.Call(m, "List", ctx, storageID, ns, rangeID)
 	ret0, _ := ret[0].(graveler.ValueIterator)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // List indicates an expected call of List.
-func (mr *MockCommittedManagerMockRecorder) List(ctx, ns, rangeID interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) List(ctx, storageID, ns, rangeID interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "List", reflect.TypeOf((*MockCommittedManager)(nil).List), ctx, ns, rangeID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "List", reflect.TypeOf((*MockCommittedManager)(nil).List), ctx, storageID, ns, rangeID)
 }
 
 // Merge mocks base method.
@@ -2532,48 +2783,48 @@ func (mr *MockCommittedManagerMockRecorder) Merge(ctx, ns, destination, source, 
 }
 
 // WriteMetaRange mocks base method.
-func (m *MockCommittedManager) WriteMetaRange(ctx context.Context, ns graveler.StorageNamespace, ranges []*graveler.RangeInfo) (*graveler.MetaRangeInfo, error) {
+func (m *MockCommittedManager) WriteMetaRange(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, ranges []*graveler.RangeInfo) (*graveler.MetaRangeInfo, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "WriteMetaRange", ctx, ns, ranges)
+	ret := m.ctrl.Call(m, "WriteMetaRange", ctx, storageID, ns, ranges)
 	ret0, _ := ret[0].(*graveler.MetaRangeInfo)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // WriteMetaRange indicates an expected call of WriteMetaRange.
-func (mr *MockCommittedManagerMockRecorder) WriteMetaRange(ctx, ns, ranges interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) WriteMetaRange(ctx, storageID, ns, ranges interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteMetaRange", reflect.TypeOf((*MockCommittedManager)(nil).WriteMetaRange), ctx, ns, ranges)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteMetaRange", reflect.TypeOf((*MockCommittedManager)(nil).WriteMetaRange), ctx, storageID, ns, ranges)
 }
 
 // WriteMetaRangeByIterator mocks base method.
-func (m *MockCommittedManager) WriteMetaRangeByIterator(ctx context.Context, ns graveler.StorageNamespace, it graveler.ValueIterator, metadata graveler.Metadata) (*graveler.MetaRangeID, error) {
+func (m *MockCommittedManager) WriteMetaRangeByIterator(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, it graveler.ValueIterator, metadata graveler.Metadata) (*graveler.MetaRangeID, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "WriteMetaRangeByIterator", ctx, ns, it, metadata)
+	ret := m.ctrl.Call(m, "WriteMetaRangeByIterator", ctx, storageID, ns, it, metadata)
 	ret0, _ := ret[0].(*graveler.MetaRangeID)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // WriteMetaRangeByIterator indicates an expected call of WriteMetaRangeByIterator.
-func (mr *MockCommittedManagerMockRecorder) WriteMetaRangeByIterator(ctx, ns, it, metadata interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) WriteMetaRangeByIterator(ctx, storageID, ns, it, metadata interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteMetaRangeByIterator", reflect.TypeOf((*MockCommittedManager)(nil).WriteMetaRangeByIterator), ctx, ns, it, metadata)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteMetaRangeByIterator", reflect.TypeOf((*MockCommittedManager)(nil).WriteMetaRangeByIterator), ctx, storageID, ns, it, metadata)
 }
 
 // WriteRange mocks base method.
-func (m *MockCommittedManager) WriteRange(ctx context.Context, ns graveler.StorageNamespace, it graveler.ValueIterator) (*graveler.RangeInfo, error) {
+func (m *MockCommittedManager) WriteRange(ctx context.Context, storageID graveler.StorageID, ns graveler.StorageNamespace, it graveler.ValueIterator) (*graveler.RangeInfo, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "WriteRange", ctx, ns, it)
+	ret := m.ctrl.Call(m, "WriteRange", ctx, storageID, ns, it)
 	ret0, _ := ret[0].(*graveler.RangeInfo)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // WriteRange indicates an expected call of WriteRange.
-func (mr *MockCommittedManagerMockRecorder) WriteRange(ctx, ns, it interface{}) *gomock.Call {
+func (mr *MockCommittedManagerMockRecorder) WriteRange(ctx, storageID, ns, it interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteRange", reflect.TypeOf((*MockCommittedManager)(nil).WriteRange), ctx, ns, it)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteRange", reflect.TypeOf((*MockCommittedManager)(nil).WriteRange), ctx, storageID, ns, it)
 }
 
 // MockStagingManager is a mock of StagingManager interface.

@@ -13,6 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/go-openapi/swag"
+	"github.com/thanhpk/randstr"
+
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/tags"
@@ -50,6 +58,61 @@ func newMinioClient(t *testing.T, getCredentials GetCredentials) *minio.Client {
 		t.Fatalf("minio.New: %s", err)
 	}
 	return client
+}
+
+func TestS3UploadToReadOnlyRepoError(t *testing.T) {
+	ctx, _, repo := setupTest(t)
+	defer tearDownTest(repo)
+
+	readOnlyRepo := createReadOnlyRepositoryByName(ctx, t, "tests3uploadobjectdestreadonly")
+	defer deleteRepositoryIfAskedTo(ctx, readOnlyRepo)
+
+	minioClient := newMinioClient(t, credentials.NewStaticV4)
+	const tenMibi = 10 * 1024 * 1024
+	reader := NewZeroReader(tenMibi)
+
+	_, err := minioClient.PutObject(ctx, readOnlyRepo, gatewayTestPrefix+"/test", reader, tenMibi, minio.PutObjectOptions{
+		// this prevents minio from reading the entire file before sending the request
+		SendContentMd5: false,
+	})
+	require.NotNil(t, err)
+	require.Contains(t, err.Error(), "read-only")
+
+	// The read-only check should occur before we read the file.
+	// To ensure that, we're asserting that the file was not read entirely.
+	// (The minio client reads at least one chunk of the file before sending the request,
+	// so `NumBytesRead` is probably not 0, but must be < 10MB.)
+	require.Less(t, reader.NumBytesRead, tenMibi)
+}
+
+func TestS3DeleteFromReadOnlyRepoError(t *testing.T) {
+	ctx, _, repo := setupTest(t)
+	defer tearDownTest(repo)
+
+	readOnlyRepo := createReadOnlyRepositoryByName(ctx, t, "tests3deleteobjectdestreadonly")
+	defer deleteRepositoryIfAskedTo(ctx, readOnlyRepo)
+
+	minioClient := newMinioClient(t, credentials.NewStaticV4)
+	content := "some random data"
+	contentReader := strings.NewReader(content)
+
+	path := gatewayTestPrefix + "test"
+	_, uploadErr := client.UploadObjectWithBodyWithResponse(ctx, readOnlyRepo, mainBranch, &apigen.UploadObjectParams{
+		Path:  path,
+		Force: swag.Bool(true),
+	}, "application/octet-stream", contentReader)
+	require.Nil(t, uploadErr)
+
+	t.Run("existing object", func(t *testing.T) {
+		err := minioClient.RemoveObject(ctx, readOnlyRepo, path, minio.RemoveObjectOptions{})
+		require.NotNil(t, err)
+		require.Contains(t, err.Error(), "read-only")
+	})
+	t.Run("non existing object", func(t *testing.T) {
+		err := minioClient.RemoveObject(ctx, readOnlyRepo, path+"not-existing", minio.RemoveObjectOptions{})
+		require.NotNil(t, err)
+		require.Contains(t, err.Error(), "read-only")
+	})
 }
 
 func TestS3UploadAndDownload(t *testing.T) {
@@ -122,6 +185,268 @@ func TestS3UploadAndDownload(t *testing.T) {
 			wg.Wait()
 		})
 	}
+}
+
+func TestMultipartUploadIfNoneMatch(t *testing.T) {
+	ctx, log, repo := setupTest(t)
+	defer tearDownTest(repo)
+	s3Endpoint := viper.GetString("s3_endpoint")
+	s3Client := createS3Client(s3Endpoint, t)
+	testCases := []struct {
+		Name          string
+		Path          string
+		IfNoneMatch   string
+		ExpectedError string
+	}{
+		{
+			Name: "sanity",
+			Path: "main/object1",
+		},
+		{
+			Name:          "object exists",
+			Path:          "main/object1",
+			IfNoneMatch:   "*",
+			ExpectedError: gtwerrors.ErrPreconditionFailed.Error(),
+		},
+		{
+			Name:        "object doesn't exist",
+			Path:        "main/object2",
+			IfNoneMatch: "*",
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.Name, func(t *testing.T) {
+			input := &s3.CreateMultipartUploadInput{
+				Bucket: aws.String(repo),
+				Key:    aws.String(tt.Path),
+			}
+
+			resp, err := s3Client.CreateMultipartUpload(ctx, input)
+			require.NoError(t, err, "failed to create multipart upload")
+
+			parts := make([][]byte, multipartNumberOfParts)
+			for i := 0; i < multipartNumberOfParts; i++ {
+				parts[i] = randstr.Bytes(multipartPartSize + i)
+			}
+
+			completedParts := uploadMultipartParts(t, ctx, s3Client, log, resp, parts, 0)
+			completeInput := &s3.CompleteMultipartUploadInput{
+				Bucket:   resp.Bucket,
+				Key:      resp.Key,
+				UploadId: resp.UploadId,
+				MultipartUpload: &types.CompletedMultipartUpload{
+					Parts: completedParts,
+				},
+			}
+			_, err = s3Client.CompleteMultipartUpload(ctx, completeInput, s3.WithAPIOptions(setIfNonMatchHeader(tt.IfNoneMatch)))
+			if tt.ExpectedError != "" {
+				require.ErrorContains(t, err, tt.ExpectedError)
+			} else {
+				require.NoError(t, err, "expected no error but got: %w", err)
+			}
+		})
+	}
+}
+
+func TestS3IfNoneMatch(t *testing.T) {
+	ctx, _, repo := setupTest(t)
+	defer tearDownTest(repo)
+
+	s3Endpoint := viper.GetString("s3_endpoint")
+	s3Client := createS3Client(s3Endpoint, t)
+	testCases := []struct {
+		Name          string
+		Path          string
+		IfNoneMatch   string
+		ExpectedError string
+	}{
+		{
+			Name: "sanity",
+			Path: "main/object1",
+		},
+		{
+			Name:          "object exists",
+			Path:          "main/object1",
+			IfNoneMatch:   "*",
+			ExpectedError: gtwerrors.ErrPreconditionFailed.Error(),
+		},
+		{
+			Name:        "object doesn't exist",
+			Path:        "main/object2",
+			IfNoneMatch: "*",
+		},
+		{
+			Name:          "unsupported value",
+			Path:          "main/object3",
+			IfNoneMatch:   "unsupported string",
+			ExpectedError: gtwerrors.ErrNotImplemented.Error(),
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.Name, func(t *testing.T) {
+			input := &s3.PutObjectInput{
+				Bucket: aws.String(repo),
+				Key:    aws.String(tt.Path),
+			}
+			_, err := s3Client.PutObject(ctx, input, s3.WithAPIOptions(setIfNonMatchHeader(tt.IfNoneMatch)))
+			if tt.ExpectedError != "" {
+				require.ErrorContains(t, err, tt.ExpectedError)
+			} else {
+				require.NoError(t, err, "expected no error but got: %w", err)
+			}
+		})
+	}
+}
+
+func setIfNonMatchHeader(ifNoneMatch string) func(*middleware.Stack) error {
+	return func(stack *middleware.Stack) error {
+		return stack.Build.Add(middleware.BuildMiddlewareFunc("AddIfNoneMatchHeader", func(
+			ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler,
+		) (
+			middleware.BuildOutput, middleware.Metadata, error,
+		) {
+			if req, ok := in.Request.(*smithyhttp.Request); ok {
+				req.Header.Set("If-None-Match", ifNoneMatch)
+			}
+			return next.HandleBuild(ctx, in)
+		}), middleware.Before)
+	}
+}
+
+func TestListMultipartUploads(t *testing.T) {
+	blockStoreType := viper.GetString(ViperBlockstoreType)
+	if blockStoreType != "s3" {
+		return
+	}
+	ctx, logger, repo := setupTest(t)
+	defer tearDownTest(repo)
+	s3Endpoint := viper.GetString("s3_endpoint")
+	s3Client := createS3Client(s3Endpoint, t)
+	multipartNumberOfParts := 3
+	multipartPartSize := 5 * 1024 * 1024
+
+	// create two objects for two mpus
+	obj1 := "object1"
+	obj2 := "object2"
+	keysPrefix := "main/"
+	key1 := keysPrefix + obj1
+	key2 := keysPrefix + obj2
+
+	input1 := &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(repo),
+		Key:    aws.String(key1),
+	}
+	input2 := &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(repo),
+		Key:    aws.String(key2),
+	}
+	// create first mpu
+	resp1, err := s3Client.CreateMultipartUpload(ctx, input1)
+	require.NoError(t, err, "failed to create multipart upload")
+	parts := make([][]byte, multipartNumberOfParts)
+	for i := 0; i < multipartNumberOfParts; i++ {
+		parts[i] = randstr.Bytes(multipartPartSize + i)
+	}
+
+	completedParts1 := uploadMultipartParts(t, ctx, s3Client, logger, resp1, parts, 0)
+
+	completeInput1 := &s3.CompleteMultipartUploadInput{
+		Bucket:   resp1.Bucket,
+		Key:      resp1.Key,
+		UploadId: resp1.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: completedParts1,
+		},
+	}
+	// check first mpu appears
+	output, err := s3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: resp1.Bucket})
+	require.NoError(t, err, "error listing multiparts")
+	keys := extractUploadKeys(output)
+	require.Contains(t, keys, obj1)
+
+	// create second mpu check both appear
+	_, err = s3Client.CreateMultipartUpload(ctx, input2)
+	require.NoError(t, err, "failed to create multipart upload")
+	output, err = s3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: resp1.Bucket})
+	keys = extractUploadKeys(output)
+	require.Contains(t, keys, obj1)
+	require.Contains(t, keys, obj2)
+
+	// testing maxuploads - only first upload should return
+	maxUploads := aws.Int32(1)
+	output, err = s3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: resp1.Bucket, MaxUploads: maxUploads})
+	require.NoError(t, err, "failed to list multipart uploads")
+	keys = extractUploadKeys(output)
+	require.Contains(t, keys, obj1)
+	require.NotContains(t, keys, obj2)
+
+	// testing key marker and upload id marker for pagination. only records after marker should return
+	keyMarker := output.NextKeyMarker
+	uploadIDMarker := output.NextUploadIdMarker
+	output, err = s3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: resp1.Bucket, MaxUploads: maxUploads, KeyMarker: keyMarker, UploadIdMarker: uploadIDMarker})
+	require.NoError(t, err, "failed to list multipart uploads")
+	keys = extractUploadKeys(output)
+	require.NotContains(t, keys, obj1)
+	require.Contains(t, keys, obj2)
+
+	// finish first mpu check only second appear
+	_, err = s3Client.CompleteMultipartUpload(ctx, completeInput1)
+	require.NoError(t, err, "failed to complete multipart upload")
+	output, err = s3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: resp1.Bucket})
+	require.NoError(t, err, "error listing multiparts")
+	keys = extractUploadKeys(output)
+	require.NotContains(t, keys, obj1)
+	require.Contains(t, keys, obj2)
+
+}
+
+func TestListMultipartUploadsUnsupported(t *testing.T) {
+	blockStoreType := viper.GetString(ViperBlockstoreType)
+	if blockStoreType != "s3" {
+		return
+	}
+	ctx, _, repo := setupTest(t)
+	defer tearDownTest(repo)
+	s3Endpoint := viper.GetString("s3_endpoint")
+	s3Client := createS3Client(s3Endpoint, t)
+	Bucket := aws.String(repo)
+
+	delimiter := aws.String("/")
+	prefix := aws.String("prefix")
+	encodingType := types.EncodingTypeUrl
+
+	t.Run("Delimiter", func(t *testing.T) {
+		_, err := s3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: Bucket, Delimiter: delimiter})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "NotImplemented")
+	})
+
+	t.Run("Prefix", func(t *testing.T) {
+		_, err := s3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: Bucket, Prefix: prefix})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "NotImplemented")
+	})
+
+	t.Run("EncodingType", func(t *testing.T) {
+		_, err := s3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: Bucket, EncodingType: encodingType})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "NotImplemented")
+	})
+}
+
+func extractUploadKeys(output *s3.ListMultipartUploadsOutput) []string {
+	if output == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(output.Uploads))
+	for _, upload := range output.Uploads {
+		if upload.Key != nil {
+			keys = append(keys, *upload.Key)
+		}
+	}
+	return keys
 }
 
 func verifyObjectInfo(t *testing.T, got minio.ObjectInfo, expectedSize int) {
@@ -455,11 +780,14 @@ func TestS3CopyObject(t *testing.T) {
 	objContent := testutil.RandomString(r, randomDataContentLength)
 	srcPath := gatewayTestPrefix + "source-file"
 	destPath := gatewayTestPrefix + "dest-file"
+	userMetadata := map[string]string{"X-Amz-Meta-Key1": "value1", "X-Amz-Meta-Key2": "value2"}
 
 	// upload data
 	s3lakefsClient := newMinioClient(t, credentials.NewStaticV2)
 	_, err := s3lakefsClient.PutObject(ctx, repo, srcPath, strings.NewReader(objContent), int64(len(objContent)),
-		minio.PutObjectOptions{})
+		minio.PutObjectOptions{
+			UserMetadata: userMetadata,
+		})
 	require.NoError(t, err)
 
 	t.Run("same_branch", func(t *testing.T) {
@@ -503,14 +831,19 @@ func TestS3CopyObject(t *testing.T) {
 		sourceObjectStats := resp.JSON200
 		destObjectStats := resp.JSON200
 		require.Equal(t, sourceObjectStats.PhysicalAddress, destObjectStats.PhysicalAddress, "source and dest physical address should match")
+		require.Equal(t, userMetadata, destObjectStats.Metadata.AdditionalProperties, "source and dest metadata should match")
 	})
 
 	t.Run("different_repo", func(t *testing.T) {
 		// copy the object to different repository. should create another version of the file
+		userMetadataReplace := map[string]string{"X-Amz-Meta-Key1": "value1Replace", "X-Amz-Meta-Key2": "value2Replace"}
+
 		_, err := s3lakefsClient.CopyObject(ctx,
 			minio.CopyDestOptions{
-				Bucket: destRepo,
-				Object: destPath,
+				Bucket:          destRepo,
+				Object:          destPath,
+				UserMetadata:    userMetadataReplace,
+				ReplaceMetadata: true,
 			},
 			minio.CopySrcOptions{
 				Bucket: repo,
@@ -547,6 +880,7 @@ func TestS3CopyObject(t *testing.T) {
 
 		// assert that the physical addresses of the objects are not the same
 		require.NotEqual(t, sourceObjectStats.PhysicalAddress, destObjectStats.PhysicalAddress)
+		require.Equal(t, userMetadataReplace, destObjectStats.Metadata.AdditionalProperties, "dest metadata should be replaced")
 	})
 }
 
@@ -571,6 +905,9 @@ func TestS3PutObjectTagging(t *testing.T) {
 func TestS3CopyObjectErrors(t *testing.T) {
 	ctx, _, repo := setupTest(t)
 	defer tearDownTest(repo)
+
+	readOnlyRepo := createReadOnlyRepositoryByName(ctx, t, "tests3copyobjectdestreadonly")
+	defer deleteRepositoryIfAskedTo(ctx, readOnlyRepo)
 
 	requireBlockstoreType(t, block.BlockstoreTypeS3)
 	destPath := gatewayTestPrefix + "dest-file"
@@ -625,9 +962,24 @@ func TestS3CopyObjectErrors(t *testing.T) {
 		require.NotNil(t, err)
 		require.Contains(t, err.Error(), "NoSuchKey")
 	})
+
+	t.Run("readonly repo from non-existing source", func(t *testing.T) {
+		_, err := s3lakefsClient.CopyObject(ctx,
+			minio.CopyDestOptions{
+				Bucket: readOnlyRepo,
+				Object: destPath,
+			},
+			minio.CopySrcOptions{
+				Bucket: repo,
+				Object: "not-a-branch/data/not-found",
+			})
+		require.NotNil(t, err)
+		require.Contains(t, err.Error(), "read-only")
+	})
 }
 
 func TestS3ReadObjectRedirect(t *testing.T) {
+	requireBlockstoreType(t, block.BlockstoreTypeS3)
 	const (
 		contents = "the quick brown fox jumps over the lazy dog"
 		goodPath = "main/exists.txt"
@@ -653,5 +1005,30 @@ func TestS3ReadObjectRedirect(t *testing.T) {
 		// Verify we got redirect
 		_, err = io.ReadAll(res)
 		require.Contains(t, err.Error(), "307 Temporary Redirect")
+	})
+}
+
+func createS3Client(endpoint string, t *testing.T) *s3.Client {
+	accessKeyID := viper.GetString("access_key_id")
+	secretAccessKey := viper.GetString("secret_access_key")
+	s3Client, err := testutil.SetupTestS3Client(endpoint, accessKeyID, secretAccessKey, true)
+	require.NoError(t, err, "failed creating s3 client")
+	return s3Client
+}
+
+func TestPossibleAPIEndpointError(t *testing.T) {
+	ctx, _, repo := setupTest(t)
+	defer tearDownTest(repo)
+
+	t.Run("use_open_api_for_client_endpoint", func(t *testing.T) {
+		s3Client := createS3Client(endpointURL+apiutil.BaseURL, t)
+		_, listErr := s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String("not-exists")})
+		require.ErrorContains(t, listErr, gtwerrors.ErrNoSuchBucketPossibleAPIEndpoint.Error())
+	})
+
+	t.Run("use_proper_client_endpoint", func(t *testing.T) {
+		s3Client := createS3Client(endpointURL, t)
+		_, listErr := s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String("not-exists")})
+		require.ErrorContains(t, listErr, gtwerrors.ErrNoSuchBucket.Error())
 	})
 }

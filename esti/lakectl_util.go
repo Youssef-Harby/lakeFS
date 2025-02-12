@@ -25,7 +25,7 @@ var (
 )
 
 var (
-	reTimestamp       = regexp.MustCompile(`timestamp: \d+\n`)
+	reTimestamp       = regexp.MustCompile(`timestamp: \d+`)
 	reTime            = regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [-+]\d{4} \w{1,4}`)
 	reCommitID        = regexp.MustCompile(`[\d|a-f]{64}`)
 	reShortCommitID   = regexp.MustCompile(`[\d|a-f]{16}`)
@@ -34,16 +34,23 @@ var (
 	rePhysicalAddress = regexp.MustCompile(`/data/[0-9a-v]{20}/(?:[0-9a-v]{20}(?:,.+)?)?`)
 	reVariable        = regexp.MustCompile(`\$\{([^${}]+)}`)
 	rePreSignURL      = regexp.MustCompile(`https://\S+\?\S+`)
+	reSecretAccessKey = regexp.MustCompile(`secret_access_key: \S{16,128}`)
+	reAccessKeyID     = regexp.MustCompile(`access_key_id: AKIA\S{12,124}`)
 )
 
 func lakectlLocation() string {
-	return viper.GetString("lakectl_dir") + "/lakectl"
+	return viper.GetString("binaries_dir") + "/lakectl"
 }
 
 func LakectlWithParams(accessKeyID, secretAccessKey, endPointURL string) string {
+	return LakectlWithParamsWithPosixPerms(accessKeyID, secretAccessKey, endPointURL, false)
+}
+
+func LakectlWithParamsWithPosixPerms(accessKeyID, secretAccessKey, endPointURL string, withPosixPerms bool) string {
 	lakectlCmdline := "LAKECTL_CREDENTIALS_ACCESS_KEY_ID=" + accessKeyID +
 		" LAKECTL_CREDENTIALS_SECRET_ACCESS_KEY=" + secretAccessKey +
 		" LAKECTL_SERVER_ENDPOINT_URL=" + endPointURL +
+		" LAKECTL_EXPERIMENTAL_LOCAL_POSIX_PERMISSIONS_ENABLED=" + strconv.FormatBool(withPosixPerms) +
 		" " + lakectlLocation()
 
 	return lakectlCmdline
@@ -51,6 +58,10 @@ func LakectlWithParams(accessKeyID, secretAccessKey, endPointURL string) string 
 
 func Lakectl() string {
 	return LakectlWithParams(viper.GetString("access_key_id"), viper.GetString("secret_access_key"), viper.GetString("endpoint_url"))
+}
+
+func LakectlWithPosixPerms() string {
+	return LakectlWithParamsWithPosixPerms(viper.GetString("access_key_id"), viper.GetString("secret_access_key"), viper.GetString("endpoint_url"), true)
 }
 
 func runShellCommand(t *testing.T, command string, isTerminal bool) ([]byte, error) {
@@ -130,12 +141,14 @@ func sanitize(output string, vars map[string]string) string {
 	if _, ok := vars["DATE"]; !ok {
 		s = normalizeProgramTimestamp(s)
 	}
-	s = normalizeCommitID(s)
-	s = normalizeChecksum(s)
-	s = normalizeShortCommitID(s)
 	s = normalizeEndpoint(s, vars["LAKEFS_ENDPOINT"])
 	s = normalizePreSignURL(s)                       // should be after storage and endpoint to enable non pre-sign url on azure
 	s = normalizeRandomObjectKey(s, vars["STORAGE"]) // should be after pre-sign on azure in order not to break the pre-sign url
+	s = normalizeCommitID(s)
+	s = normalizeChecksum(s)
+	s = normalizeShortCommitID(s)
+	s = normalizeAccessKeyID(s)
+	s = normalizeSecretAccessKey(s)
 	return s
 }
 
@@ -146,10 +159,20 @@ func RunCmdAndVerifySuccessWithFile(t *testing.T, cmd string, isTerminal bool, g
 
 func RunCmdAndVerifyContainsText(t *testing.T, cmd string, isTerminal bool, expectedRaw string, vars map[string]string) {
 	t.Helper()
+	runCmdAndVerifyContainsText(t, cmd, false, isTerminal, expectedRaw, vars)
+}
+
+func RunCmdAndVerifyFailureContainsText(t *testing.T, cmd string, isTerminal bool, expectedRaw string, vars map[string]string) {
+	t.Helper()
+	runCmdAndVerifyContainsText(t, cmd, true, isTerminal, expectedRaw, vars)
+}
+
+func runCmdAndVerifyContainsText(t *testing.T, cmd string, expectFail, isTerminal bool, expectedRaw string, vars map[string]string) {
+	t.Helper()
 	s := sanitize(expectedRaw, vars)
 	expected, err := expandVariables(s, vars)
-	require.NoErrorf(t, err, "Variable embed failed - %s", err)
-	sanitizedResult := runCmd(t, cmd, false, isTerminal, vars)
+	require.NoError(t, err, "Variable embed failed - %s", err)
+	sanitizedResult := runCmd(t, cmd, expectFail, isTerminal, vars)
 	require.Contains(t, sanitizedResult, expected)
 }
 
@@ -209,7 +232,7 @@ func runCmdAndVerifyResult(t *testing.T, cmd string, expectFail bool, isTerminal
 	t.Helper()
 	expanded, err := expandVariables(expected, vars)
 	if err != nil {
-		t.Fatal("Failed to extract variables for:", cmd)
+		t.Fatalf("Failed to extract variables for: \"%s\": %s", cmd, err)
 	}
 	sanitizedResult := runCmd(t, cmd, expectFail, isTerminal, vars)
 
@@ -247,4 +270,12 @@ func normalizeEndpoint(output string, endpoint string) string {
 
 func normalizePreSignURL(output string) string {
 	return rePreSignURL.ReplaceAllString(output, "<PRE_SIGN_URL>")
+}
+
+func normalizeAccessKeyID(output string) string {
+	return reAccessKeyID.ReplaceAllString(output, "access_key_id: <ACCESS_KEY_ID>")
+}
+
+func normalizeSecretAccessKey(output string) string {
+	return reSecretAccessKey.ReplaceAllString(output, "secret_access_key: <SECRET_ACCESS_KEY>")
 }

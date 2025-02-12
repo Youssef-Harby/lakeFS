@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -152,21 +151,24 @@ func (l *Adapter) Path() string {
 	return l.path
 }
 
-func (l *Adapter) Put(_ context.Context, obj block.ObjectPointer, _ int64, reader io.Reader, _ block.PutOpts) error {
+func (l *Adapter) Put(_ context.Context, obj block.ObjectPointer, _ int64, reader io.Reader, _ block.PutOpts) (*block.PutResponse, error) {
 	p, err := l.extractParamsFromObj(obj)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	p = filepath.Clean(p)
 	f, err := l.maybeMkdir(p, os.Create)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() {
 		_ = f.Close()
 	}()
 	_, err = io.Copy(f, reader)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return &block.PutResponse{}, nil
 }
 
 func (l *Adapter) Remove(_ context.Context, obj block.ObjectPointer) error {
@@ -243,7 +245,12 @@ func (l *Adapter) UploadCopyPart(ctx context.Context, sourceObj, destinationObj 
 	}
 	md5Read := block.NewHashingReader(r, block.HashFunctionMD5)
 	fName := uploadID + fmt.Sprintf("-%05d", partNumber)
-	err = l.Put(ctx, block.ObjectPointer{StorageNamespace: destinationObj.StorageNamespace, Identifier: fName}, -1, md5Read, block.PutOpts{})
+	objectPointer := block.ObjectPointer{
+		StorageID:        destinationObj.StorageID,
+		StorageNamespace: destinationObj.StorageNamespace,
+		Identifier:       fName,
+	}
+	_, err = l.Put(ctx, objectPointer, -1, md5Read, block.PutOpts{})
 	if err != nil {
 		return nil, fmt.Errorf("copy put: %w", err)
 	}
@@ -263,7 +270,12 @@ func (l *Adapter) UploadCopyPartRange(ctx context.Context, sourceObj, destinatio
 	}
 	md5Read := block.NewHashingReader(r, block.HashFunctionMD5)
 	fName := uploadID + fmt.Sprintf("-%05d", partNumber)
-	err = l.Put(ctx, block.ObjectPointer{StorageNamespace: destinationObj.StorageNamespace, Identifier: fName}, -1, md5Read, block.PutOpts{})
+	objectPointer := block.ObjectPointer{
+		StorageID:        destinationObj.StorageID,
+		StorageNamespace: destinationObj.StorageNamespace,
+		Identifier:       fName,
+	}
+	_, err = l.Put(ctx, objectPointer, -1, md5Read, block.PutOpts{})
 	if err != nil {
 		return nil, fmt.Errorf("copy range put: %w", err)
 	}
@@ -288,12 +300,12 @@ func (l *Adapter) Get(_ context.Context, obj block.ObjectPointer) (reader io.Rea
 	return f, nil
 }
 
-func (l *Adapter) GetWalker(uri *url.URL) (block.Walker, error) {
-	if err := block.ValidateStorageType(uri, block.StorageTypeLocal); err != nil {
+func (l *Adapter) GetWalker(_ string, opts block.WalkerOptions) (block.Walker, error) {
+	if err := block.ValidateStorageType(opts.StorageURI, block.StorageTypeLocal); err != nil {
 		return nil, err
 	}
-
-	err := VerifyAbsPath(uri.Path, l.path, l.allowedExternalPrefixes)
+	uriPath := strings.TrimSuffix(opts.StorageURI.Path, string(filepath.Separator))
+	err := VerifyAbsPath(uriPath, l.path, l.allowedExternalPrefixes)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +407,12 @@ func (l *Adapter) UploadPart(ctx context.Context, obj block.ObjectPointer, _ int
 	}
 	md5Read := block.NewHashingReader(reader, block.HashFunctionMD5)
 	fName := uploadID + fmt.Sprintf("-%05d", partNumber)
-	err := l.Put(ctx, block.ObjectPointer{StorageNamespace: obj.StorageNamespace, Identifier: fName}, -1, md5Read, block.PutOpts{})
+	objectPointer := block.ObjectPointer{
+		StorageID:        obj.StorageID,
+		StorageNamespace: obj.StorageNamespace,
+		Identifier:       fName,
+	}
+	_, err := l.Put(ctx, objectPointer, -1, md5Read, block.PutOpts{})
 	etag := hex.EncodeToString(md5Read.Md5.Sum(nil))
 	return &block.UploadPartResponse{
 		ETag: etag,
@@ -502,6 +519,7 @@ func (l *Adapter) removePartFiles(files []string) error {
 
 func (l *Adapter) getPartFiles(uploadID string, obj block.ObjectPointer) ([]string, error) {
 	newObj := block.ObjectPointer{
+		StorageID:        obj.StorageID,
 		StorageNamespace: obj.StorageNamespace,
 		Identifier:       uploadID,
 	}
@@ -522,15 +540,19 @@ func (l *Adapter) BlockstoreType() string {
 	return block.BlockstoreTypeLocal
 }
 
-func (l *Adapter) GetStorageNamespaceInfo() block.StorageNamespaceInfo {
+func (l *Adapter) BlockstoreMetadata(_ context.Context) (*block.BlockstoreMetadata, error) {
+	return nil, block.ErrOperationNotSupported
+}
+
+func (l *Adapter) GetStorageNamespaceInfo(string) *block.StorageNamespaceInfo {
 	info := block.DefaultStorageNamespaceInfo(block.BlockstoreTypeLocal)
 	info.PreSignSupport = false
 	info.DefaultNamespacePrefix = DefaultNamespacePrefix
 	info.ImportSupport = l.importEnabled
-	return info
+	return &info
 }
 
-func (l *Adapter) ResolveNamespace(storageNamespace, key string, identifierType block.IdentifierType) (block.QualifiedKey, error) {
+func (l *Adapter) ResolveNamespace(storageID, storageNamespace, key string, identifierType block.IdentifierType) (block.QualifiedKey, error) {
 	qk, err := block.DefaultResolveNamespace(storageNamespace, key, identifierType)
 	if err != nil {
 		return nil, err
@@ -538,6 +560,7 @@ func (l *Adapter) ResolveNamespace(storageNamespace, key string, identifierType 
 
 	// Check if path allowed and return error if path is not allowed
 	_, err = l.extractParamsFromObj(block.ObjectPointer{
+		StorageID:        storageID,
 		StorageNamespace: storageNamespace,
 		Identifier:       key,
 		IdentifierType:   identifierType,
@@ -550,6 +573,10 @@ func (l *Adapter) ResolveNamespace(storageNamespace, key string, identifierType 
 		CommonQualifiedKey: qk,
 		path:               l.path,
 	}, nil
+}
+
+func (l *Adapter) GetRegion(_ context.Context, _, _ string) (string, error) {
+	return "", block.ErrOperationNotSupported
 }
 
 func (l *Adapter) RuntimeStats() map[string]string {
@@ -587,5 +614,8 @@ func (l *Adapter) GetPresignUploadPartURL(_ context.Context, _ block.ObjectPoint
 }
 
 func (l *Adapter) ListParts(_ context.Context, _ block.ObjectPointer, _ string, _ block.ListPartsOpts) (*block.ListPartsResponse, error) {
+	return nil, block.ErrOperationNotSupported
+}
+func (l *Adapter) ListMultipartUploads(_ context.Context, _ block.ObjectPointer, _ block.ListMultipartUploadsOpts) (*block.ListMultipartUploadsResponse, error) {
 	return nil, block.ErrOperationNotSupported
 }

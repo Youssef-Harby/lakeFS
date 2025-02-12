@@ -30,6 +30,9 @@ type Store struct {
 
 const (
 	DriverName = "cosmosdb"
+
+	// '-1' Used by the cosmosdb client for dynamic page size
+	dynamicPageSize = -1
 )
 
 // encoding is the encoding used to encode the partition keys, ids and values.
@@ -356,11 +359,11 @@ func (s *Store) Scan(ctx context.Context, partitionKey []byte, options kv.ScanOp
 		store:        s,
 		partitionKey: partitionKey,
 		startKey:     options.KeyStart,
-		limit:        options.BatchSize,
 		queryCtx:     ctx,
 		encoding:     encoding,
+		batchSize:    options.BatchSize,
 	}
-	if err := it.runQuery(); err != nil {
+	if err := it.runQuery(true); err != nil {
 		return nil, convertError(err)
 	}
 	return it, nil
@@ -373,7 +376,7 @@ type EntriesIterator struct {
 	store        *Store
 	partitionKey []byte
 	startKey     []byte
-	limit        int
+	batchSize    int
 
 	entry        *kv.Entry
 	err          error
@@ -416,12 +419,21 @@ func (e *EntriesIterator) Next() bool {
 		if !e.queryPager.More() {
 			return false
 		}
-		var err error
-		e.currPage, err = e.queryPager.NextPage(e.queryCtx)
-		if err != nil {
-			e.err = fmt.Errorf("getting next page: %w", convertError(err))
-			return false
+
+		if e.batchSize != dynamicPageSize {
+			if err := e.handleBatchSizeChange(); err != nil {
+				e.err = convertError(err)
+				return false
+			}
+		} else {
+			var err error
+			e.currPage, err = e.queryPager.NextPage(e.queryCtx)
+			if err != nil {
+				e.err = fmt.Errorf("getting next page: %w", convertError(err))
+				return false
+			}
 		}
+
 		if len(e.currPage.Items) == 0 {
 			// returned page is empty, no more items
 			return false
@@ -442,10 +454,32 @@ func (e *EntriesIterator) Next() bool {
 	return true
 }
 
+// handleBatchSizeChange handles running query after the first query ran with limited batch size.
+// The reason we switch the batch size is to avoid issues like https://github.com/treeverse/lakeFS/issues/7864
+// as opposed to the exponential backoff approach in dynamoDB here we use a dynamic page size and let Cosmos DB manage paging.
+func (e *EntriesIterator) handleBatchSizeChange() error {
+	if e.entry != nil {
+		e.startKey = e.entry.Key
+	} else {
+		e.store.logger.WithFields(logging.Fields{
+			"batchSize":          e.batchSize,
+			"partitionKey":       string(e.partitionKey),
+			"currEntryIdx":       e.currEntryIdx,
+			"startKey":           e.startKey,
+			"currPage.Items len": len(e.currPage.Items),
+		}).Warning("handleBatchSizeChange called when e.entry is nil")
+		e.startKey = nil
+	}
+	e.batchSize = dynamicPageSize
+	return e.runQuery(false)
+}
+
 func (e *EntriesIterator) SeekGE(key []byte) {
 	e.startKey = key
 	if !e.isInRange() {
-		if err := e.runQuery(); err != nil {
+		// '-1' Used for dynamic page size.
+		e.batchSize = dynamicPageSize
+		if err := e.runQuery(true); err != nil {
 			e.err = convertError(err)
 		}
 		return
@@ -457,10 +491,7 @@ func (e *EntriesIterator) SeekGE(key []byte) {
 		}
 		return bytes.Compare(key, currentKey) <= 0
 	})
-	if idx == -1 {
-		// not found, set to the end
-		e.currEntryIdx = len(e.currPage.Items)
-	}
+	// sort.Search states that if condition not met it returns n for list of size n. not found, set to the end
 	e.currEntryIdx = idx - 1
 }
 
@@ -476,11 +507,17 @@ func (e *EntriesIterator) Close() {
 	e.err = kv.ErrClosedEntries
 }
 
-func (e *EntriesIterator) runQuery() error {
+func (e *EntriesIterator) runQuery(includeStartKey bool) error {
+	operator := ">="
+	if !includeStartKey {
+		operator = ">"
+	}
+	query := fmt.Sprintf("select * from c where c.key %s @start order by c.key", operator)
+
 	pk := azcosmos.NewPartitionKeyString(encoding.EncodeToString(e.partitionKey))
-	e.queryPager = e.store.containerClient.NewQueryItemsPager("select * from c where c.key >= @start order by c.key", pk, &azcosmos.QueryOptions{
+	e.queryPager = e.store.containerClient.NewQueryItemsPager(query, pk, &azcosmos.QueryOptions{
 		ConsistencyLevel: e.store.consistencyLevel.ToPtr(),
-		PageSizeHint:     int32(e.limit),
+		PageSizeHint:     int32(e.batchSize), //nolint:gosec
 		QueryParameters: []azcosmos.QueryParameter{{
 			Name:  "@start",
 			Value: encoding.EncodeToString(e.startKey),

@@ -70,6 +70,13 @@ components:
       description: delimiter used to group common prefixes by
       schema:
         type: string
+
+    SearchString:
+      in: query
+      name: search
+      description: string for searching relevant entries
+      schema:
+        type: string
     
     IfNoneMatch:
       in: header
@@ -177,6 +184,9 @@ components:
           description: Unix Epoch in seconds
         default_branch:
           type: string
+        storage_id:
+          type: string
+          description: Unique identifier of the underlying data store. *EXPERIMENTAL*
         storage_namespace:
           type: string
           description: Filesystem URI to store the underlying data in (e.g. "s3://my-bucket/some/path/")
@@ -257,6 +267,9 @@ components:
         name:
           type: string
           pattern: "^[a-z0-9][a-z0-9-]{2,62}$"
+        storage_id:
+          type: string
+          description: Unique identifier of the underlying data store. *EXPERIMENTAL*
         storage_namespace:
           type: string
           description: 'Filesystem URI to store the underlying data in (e.g. "s3://my-bucket/some/path/")'
@@ -320,6 +333,10 @@ components:
         size_bytes:
           type: integer
           format: int64
+          description: |
+            The number of bytes in the object.  lakeFS always populates this
+            field when returning ObjectStats.  This field is optional _for
+            the client_ to supply, for instance on upload.
         mtime:
           type: integer
           format: int64
@@ -342,6 +359,15 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ObjectStats"
+
+    UpdateObjectUserMetadata:
+      type: object
+      required:
+        - set
+      properties:
+        set:
+          description: Set this object user metadata
+          $ref: "#/components/schemas/ObjectUserMetadata"
 
     ObjectCopyCreation:
       type: object
@@ -468,6 +494,18 @@ components:
           type: boolean
           default: false
 
+    CommitOverrides:
+      type: object
+      properties:
+        message:
+          type: string
+          description: replace the commit message
+        metadata:
+          type: object
+          description: replace the metadata of the commit
+          additionalProperties:
+            type: string
+
     RevertCreation:
       type: object
       required:
@@ -477,6 +515,8 @@ components:
         ref:
           type: string
           description: the commit to revert, given by a ref
+        commit_overrides:
+          $ref: "#/components/schemas/CommitOverrides"
         parent_number:
           type: integer
           description: when reverting a merge commit, the parent number (starting from 1) relative to which to perform the revert.
@@ -501,6 +541,8 @@ components:
           description: |
             When cherry-picking a merge commit, the parent number (starting from 1) with which to perform the diff.
             The default branch is parent 1.
+        commit_overrides:
+          $ref: "#/components/schemas/CommitOverrides"
         force:
           type: boolean
           default: false
@@ -645,7 +687,20 @@ components:
         force:
           type: boolean
           default: false
-
+          description: Allow merge into a read-only branch or into a branch with the same content
+        allow_empty:
+          type: boolean
+          default: false
+          description: Allow merge when the branches have the same content
+        squash_merge:
+          type: boolean
+          default: false
+          description: |
+            If set, set only the destination branch as a parent, which "squashes" the merge to
+            appear as a single commit on the destination branch.  The source commit is no longer
+            a part of the merge commit; consider adding it to the 'metadata' or 'message'
+            fields.  This behaves like a GitHub or GitLab "squash merge", or in Git terms 'git
+            merge --squash; git commit ...'.
     BranchCreation:
       type: object
       required:
@@ -658,6 +713,10 @@ components:
           type: string
         force:
           type: boolean
+          default: false
+        hidden:
+          type: boolean
+          description: When set, branch will not show up when listing branches by default. *EXPERIMENTAL*
           default: false
 
     TagCreation:
@@ -704,7 +763,7 @@ components:
         error:
           type: string
         refs:
-            $ref: "#/components/schemas/RefsDump"
+          $ref: "#/components/schemas/RefsDump"
 
     RepositoryRestoreStatus:
       type: object
@@ -863,7 +922,15 @@ components:
             RBAC will remain enabled on GUI if "external".  That only works
             with an external auth service.
           type: string
-          enum: [simplified, external]
+          enum: [none, simplified, external]
+        username_ui_placeholder:
+          description: |
+            Placeholder text to display in the username field of the login form.
+          type: string
+        password_ui_placeholder:
+            description: |
+                Placeholder text to display in the password field of the login form.
+            type: string
         login_url:
           description: primary URL to use for login.
           type: string
@@ -1001,6 +1068,8 @@ components:
           type: string
         name:
           type: string
+        description:
+          type: string
         creation_date:
           type: integer
           format: int64
@@ -1100,6 +1169,8 @@ components:
       properties:
         id:
           type: string
+        description:
+          type: string
 
     Statement:
       type: object
@@ -1190,6 +1261,23 @@ components:
           type: string
         pre_sign_multipart_upload:
           type: boolean
+        blockstore_id:
+          type: string
+        blockstore_description:
+          type: string
+        backward_compatible:
+          type: boolean
+          default: false
+        blockstore_extras:
+          type: object
+          description: blockstore specific properties
+          additionalProperties:
+            type: string
+    
+    StorageConfigList:
+      type: array
+      items:
+        $ref: "#/components/schemas/StorageConfig"
 
     Config:
       type: object
@@ -1198,6 +1286,8 @@ components:
           $ref: "#/components/schemas/VersionConfig"
         storage_config:
           $ref: "#/components/schemas/StorageConfig"
+        storage_config_list:
+          $ref: "#/components/schemas/StorageConfigList"
     VersionConfig:
       type: object
       properties:
@@ -1335,6 +1425,10 @@ components:
         content_type:
           type: string
           description: Object media type
+        mtime:
+          type: integer
+          format: int64
+          description: Unix Epoch in seconds.  May be ignored by server.
         force:
           type: boolean
           default: false
@@ -1430,7 +1524,7 @@ components:
       properties:
         type:
           type: string
-          enum: [ common_prefix, object ]
+          enum: [common_prefix, object]
           description: Path type, can either be 'common_prefix' or 'object'
         path:
           type: string
@@ -1663,7 +1757,7 @@ components:
         - installation_id
         - reports
 
-    ExternalPrincipalList: 
+    ExternalPrincipalList:
       type: object
       required:
         - pagination
@@ -1704,6 +1798,89 @@ components:
           type: object
           items:
             $ref: "#/components/schemas/ExternalPrincipalSettings"
+
+    PullRequestBasic:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [open, closed, merged]
+        title:
+          type: string
+        description:
+          type: string
+    
+    PullRequest:
+      allOf:
+        - $ref: '#/components/schemas/PullRequestBasic'
+        - required:
+            - status
+            - title
+            - description
+        - type: object
+          required:
+            - id
+            - creation_date
+            - author
+            - source_branch
+            - destination_branch
+          properties:
+            id:
+              type: string
+            creation_date:
+              type: string
+              format: date-time
+            author:
+              type: string
+            source_branch:
+              type: string
+            destination_branch:
+              type: string
+            merged_commit_id:
+              type: string
+              description: the commit id of merged PRs
+            closed_date:
+              type: string
+              format: date-time
+
+    PullRequestsList:
+      type: object
+      required:
+        - pagination
+        - results
+      properties:
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/PullRequest"
+
+    PullRequestCreation:
+      type: object
+      required:
+        - title
+        - source_branch
+        - destination_branch
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        source_branch:
+          type: string
+        destination_branch:
+          type: string
+
+    PullRequestCreationResponse:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          description: ID of the pull request
+
 paths:
   /setup_comm_prefs:
     post:
@@ -2543,11 +2720,11 @@ paths:
         - experimental
       operationId: createUserExternalPrincipal
       summary: attach external principal to user
-      requestBody: 
+      requestBody:
         required: false
-        content: 
-          application/json: 
-            schema: 
+        content:
+          application/json:
+            schema:
               $ref: "#/components/schemas/ExternalPrincipalCreation"
       responses:
         201:
@@ -2628,7 +2805,7 @@ paths:
         - external
         - experimental
       operationId: getExternalPrincipal
-      summary: describe external principal by id 
+      summary: describe external principal by id
       responses:
         200:
           description: external principal
@@ -2774,7 +2951,7 @@ paths:
           description: too many requests
         default:
           $ref: "#/components/responses/ServerError"
-        
+
   /repositories:
     get:
       tags:
@@ -2783,6 +2960,7 @@ paths:
         - $ref: "#/components/parameters/PaginationPrefix"
         - $ref: "#/components/parameters/PaginationAfter"
         - $ref: "#/components/parameters/PaginationAmount"
+        - $ref: "#/components/parameters/SearchString"
       operationId: listRepositories
       summary: list repositories
       responses:
@@ -3423,6 +3601,12 @@ paths:
         - $ref: "#/components/parameters/PaginationPrefix"
         - $ref: "#/components/parameters/PaginationAfter"
         - $ref: "#/components/parameters/PaginationAmount"
+        - in: query
+          name: show_hidden
+          schema:
+            type: boolean
+            default: false
+            description: When set - list all branches including hidden branches. *EXPERIMENTAL*
       responses:
         200:
           description: branch list
@@ -4433,10 +4617,10 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/StagingMetadata"
-              
+
       parameters:
         - $ref: "#/components/parameters/IfNoneMatch"
-          
+
       responses:
         200:
           # This actually violates HTTP, which requires returning 201 if a new object was
@@ -4880,6 +5064,51 @@ paths:
           $ref: "#/components/responses/BadRequest"
         410:
           description: object gone (but partial metadata may be available)
+        420:
+          description: too many requests
+        default:
+          $ref: "#/components/responses/ServerError"
+
+  /repositories/{repository}/branches/{branch}/objects/stat/user_metadata:
+    parameters:
+      - in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: branch
+        required: true
+        schema:
+          type: string
+        description: branch to update
+      - in: query
+        name: path
+        description: path to object relative to the branch
+        required: true
+        schema:
+          type: string
+    put:
+      tags:
+        - objects
+        - experimental
+      operationId: updateObjectUserMetadata
+      summary: rewrite (all) object metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateObjectUserMetadata"
+      responses:
+        201:
+          description: User metadata updated
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        404:
+          $ref: "#/components/responses/NotFound"
+        400:
+          $ref: "#/components/responses/BadRequest"
         420:
           description: too many requests
         default:
@@ -5557,6 +5786,197 @@ paths:
           description: too many requests
         default:
           $ref: "#/components/responses/ServerError"
+  
+  /repositories/{repository}/pulls:
+    parameters:
+      - in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - pulls
+        - experimental
+      operationId: listPullRequests
+      summary: list pull requests
+      parameters:
+        - $ref: "#/components/parameters/PaginationPrefix"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - $ref: "#/components/parameters/PaginationAmount"
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [open, closed, all]
+            default: all
+            description: filter pull requests by status
+      responses:
+        200:
+          description: list of pull requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PullRequestsList"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        404:
+          $ref: "#/components/responses/NotFound"
+        420:
+          description: too many requests
+        default:
+          $ref: "#/components/responses/ServerError"
+    post:
+      tags:
+        - pulls
+        - experimental
+      operationId: createPullRequest
+      summary: create pull request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PullRequestCreation"
+      responses:
+        201:
+          description: pull request created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PullRequestCreationResponse"
+        400:
+          $ref: "#/components/responses/ValidationError"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Forbidden"
+        404:
+          $ref: "#/components/responses/NotFound"
+        409:
+          $ref: "#/components/responses/Conflict"
+        420:
+          description: too many requests
+        default:
+          $ref: "#/components/responses/ServerError"
+
+  /repositories/{repository}/pulls/{pull_request}:
+    parameters:
+      - in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: pull_request
+        required: true
+        description: pull request id
+        schema:
+          type: string
+    get:
+      tags:
+        - pulls
+        - experimental
+      operationId: getPullRequest
+      summary: get pull request
+      responses:
+        200:
+          description: pull request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PullRequest"
+        400:
+          $ref: "#/components/responses/ValidationError"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        404:
+          $ref: "#/components/responses/NotFound"
+        420:
+          description: too many requests
+        default:
+          $ref: "#/components/responses/ServerError"
+    patch:
+      tags:
+        - pulls
+        - experimental
+      operationId: updatePullRequest
+      summary: update pull request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PullRequestBasic"
+      responses:
+        200:
+          description: pull request updated successfully
+        400:
+          $ref: "#/components/responses/ValidationError"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Forbidden"
+        404:
+          $ref: "#/components/responses/NotFound"
+        420:
+          description: too many requests
+        default:
+          $ref: "#/components/responses/ServerError"
+
+  /repositories/{repository}/pulls/{pull_request}/merge:
+    parameters:
+      - in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: pull_request
+        required: true
+        description: pull request id
+        schema:
+          type: string
+    put:
+      tags:
+        - pulls
+        - experimental
+      operationId: mergePullRequest
+      summary: merge pull request
+      responses:
+        200:
+          description: merge completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MergeResult"
+        400:
+          $ref: "#/components/responses/ValidationError"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Forbidden"
+        404:
+          $ref: "#/components/responses/NotFound"
+        409:
+          description: |
+            Conflict
+            Deprecated: content schema will return Error format and not an empty MergeResult
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MergeResult"
+        412:
+          description: precondition failed (e.g. a pre-merge hook returned a failure)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        420:
+          description: too many requests
+        default:
+          $ref: "#/components/responses/ServerError"
+
   /healthcheck:
     get:
       operationId: healthCheck
@@ -5567,6 +5987,7 @@ paths:
       responses:
         204:
           description: NoContent
+
   /config:
     get:
       tags:

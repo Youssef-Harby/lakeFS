@@ -20,6 +20,7 @@ import (
 )
 
 const (
+	IfNoneMatchHeader     = "If-None-Match"
 	CopySourceHeader      = "x-amz-copy-source"
 	CopySourceRangeHeader = "x-amz-copy-source-range"
 	QueryParamUploadID    = "uploadId"
@@ -30,7 +31,6 @@ type PutObject struct{}
 
 func (controller *PutObject) RequiredPermissions(req *http.Request, repoID, _, destPath string) (permissions.Node, error) {
 	copySource := req.Header.Get(CopySourceHeader)
-
 	if len(copySource) == 0 {
 		return permissions.Node{
 			Permission: permissions.Permission{
@@ -104,7 +104,11 @@ func handleCopy(w http.ResponseWriter, req *http.Request, o *PathOperation, copy
 	}
 
 	ctx := req.Context()
-	entry, err := o.Catalog.CopyEntry(ctx, srcPath.Repo, srcPath.Reference, srcPath.Path, repository, branch, o.Path)
+
+	metadata := amzMetaAsMetadata(req)
+	replaceMetadata := shouldReplaceMetadata(req)
+
+	entry, err := o.Catalog.CopyEntry(ctx, srcPath.Repo, srcPath.Reference, srcPath.Path, repository, branch, o.Path, replaceMetadata, metadata)
 	if err != nil {
 		o.Log(req).WithError(err).Error("could create a copy")
 		apiErr := gatewayErrors.Codes.ToAPIErrWithInternalError(gatewayErrors.ErrInvalidCopyDest, err)
@@ -174,12 +178,14 @@ func handleUploadPart(w http.ResponseWriter, req *http.Request, o *PathOperation
 		}
 
 		src := block.ObjectPointer{
+			StorageID:        srcRepo.StorageID,
 			StorageNamespace: srcRepo.StorageNamespace,
 			IdentifierType:   ent.AddressType.ToIdentifierType(),
 			Identifier:       ent.PhysicalAddress,
 		}
 
 		dst := block.ObjectPointer{
+			StorageID:        o.Repository.StorageID,
 			StorageNamespace: o.Repository.StorageNamespace,
 			IdentifierType:   block.IdentifierTypeRelative,
 			Identifier:       multiPart.PhysicalAddress,
@@ -221,6 +227,7 @@ func handleUploadPart(w http.ResponseWriter, req *http.Request, o *PathOperation
 
 	byteSize := req.ContentLength
 	resp, err := o.BlockStore.UploadPart(req.Context(), block.ObjectPointer{
+		StorageID:        o.Repository.StorageID,
 		StorageNamespace: o.Repository.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       multiPart.PhysicalAddress,
@@ -239,6 +246,10 @@ func handleUploadPart(w http.ResponseWriter, req *http.Request, o *PathOperation
 
 func (controller *PutObject) Handle(w http.ResponseWriter, req *http.Request, o *PathOperation) {
 	if o.HandleUnsupported(w, req, "torrent", "acl") {
+		return
+	}
+	if o.Repository.ReadOnly {
+		_ = o.EncodeError(w, req, nil, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrReadOnlyRepository))
 		return
 	}
 
@@ -290,8 +301,30 @@ func handlePut(w http.ResponseWriter, req *http.Request, o *PathOperation) {
 	o.Incr("put_object", o.Principal, o.Repository.Name, o.Reference)
 	storageClass := StorageClassFromHeader(req.Header)
 	opts := block.PutOpts{StorageClass: storageClass}
-	address := o.PathProvider.NewPath()
-	blob, err := upload.WriteBlob(req.Context(), o.BlockStore, o.Repository.StorageNamespace, address, req.Body, req.ContentLength, opts)
+	// check and validate whether if-none-match header provided
+	allowOverwrite, err := o.checkIfAbsent(req)
+	if err != nil {
+		_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrNotImplemented))
+		return
+	}
+	// before writing body, ensure preconditions - this means we essentially check for object existence twice:
+	// once here, before uploading the body to save resources and time,
+	// and then graveler will check again when passed a SetOptions.
+	if !allowOverwrite {
+		_, err := o.Catalog.GetEntry(req.Context(), o.Repository.Name, o.Reference, o.Path, catalog.GetEntryParams{})
+		if err == nil {
+			// In case object exists in catalog, no error returns
+			_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrPreconditionFailed))
+			return
+		}
+	}
+	objectPointer := block.ObjectPointer{
+		StorageID:        o.Repository.StorageID,
+		StorageNamespace: o.Repository.StorageNamespace,
+		IdentifierType:   block.IdentifierTypeRelative,
+		Identifier:       o.PathProvider.NewPath(),
+	}
+	blob, err := upload.WriteBlob(req.Context(), o.BlockStore, objectPointer, req.Body, req.ContentLength, opts)
 	if err != nil {
 		o.Log(req).WithError(err).Error("could not write request body to block adapter")
 		_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrInternalError))
@@ -301,7 +334,11 @@ func handlePut(w http.ResponseWriter, req *http.Request, o *PathOperation) {
 	// write metadata
 	metadata := amzMetaAsMetadata(req)
 	contentType := req.Header.Get("Content-Type")
-	err = o.finishUpload(req, blob.Checksum, blob.PhysicalAddress, blob.Size, true, metadata, contentType)
+	err = o.finishUpload(req, &blob.CreationDate, blob.Checksum, blob.PhysicalAddress, blob.Size, true, metadata, contentType, allowOverwrite)
+	if errors.Is(err, graveler.ErrPreconditionFailed) {
+		_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrPreconditionFailed))
+		return
+	}
 	if errors.Is(err, graveler.ErrWriteToProtectedBranch) {
 		_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrWriteToProtectedBranch))
 		return
@@ -316,4 +353,15 @@ func handlePut(w http.ResponseWriter, req *http.Request, o *PathOperation) {
 	}
 	o.SetHeader(w, "ETag", httputil.ETag(blob.Checksum))
 	w.WriteHeader(http.StatusOK)
+}
+
+func (o *PathOperation) checkIfAbsent(req *http.Request) (bool, error) {
+	headerValue := req.Header.Get(IfNoneMatchHeader)
+	if headerValue == "" {
+		return true, nil
+	}
+	if headerValue == "*" {
+		return false, nil
+	}
+	return false, gatewayErrors.ErrNotImplemented
 }

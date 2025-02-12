@@ -22,10 +22,17 @@ import io.lakefs.clients.sdk.model.ExternalLoginInformation;
 import io.lakefs.clients.sdk.model.ExternalPrincipal;
 import io.lakefs.clients.sdk.model.ExternalPrincipalCreation;
 import io.lakefs.clients.sdk.model.ExternalPrincipalList;
+import io.lakefs.clients.sdk.model.MergeResult;
 import io.lakefs.clients.sdk.model.ObjectStats;
 import io.lakefs.clients.sdk.model.PresignMultipartUpload;
+import io.lakefs.clients.sdk.model.PullRequest;
+import io.lakefs.clients.sdk.model.PullRequestBasic;
+import io.lakefs.clients.sdk.model.PullRequestCreation;
+import io.lakefs.clients.sdk.model.PullRequestCreationResponse;
+import io.lakefs.clients.sdk.model.PullRequestsList;
 import io.lakefs.clients.sdk.model.StagingLocation;
 import io.lakefs.clients.sdk.model.StsAuthRequest;
+import io.lakefs.clients.sdk.model.UpdateObjectUserMetadata;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
@@ -102,6 +109,20 @@ public class ExperimentalApiTest {
     }
 
     /**
+     * create pull request
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void createPullRequestTest() throws ApiException {
+        String repository = null;
+        PullRequestCreation pullRequestCreation = null;
+        PullRequestCreationResponse response = api.createPullRequest(repository, pullRequestCreation)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
      * attach external principal to user
      *
      * @throws ApiException if the Api call fails
@@ -159,6 +180,20 @@ public class ExperimentalApiTest {
     }
 
     /**
+     * get pull request
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void getPullRequestTest() throws ApiException {
+        String repository = null;
+        String pullRequest = null;
+        PullRequest response = api.getPullRequest(repository, pullRequest)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
      * hard reset branch
      *
      * Relocate branch to refer to ref.  Branch must not contain uncommitted data.
@@ -173,6 +208,27 @@ public class ExperimentalApiTest {
         Boolean force = null;
         api.hardResetBranch(repository, branch, ref)
                 .force(force)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
+     * list pull requests
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void listPullRequestsTest() throws ApiException {
+        String repository = null;
+        String prefix = null;
+        String after = null;
+        Integer amount = null;
+        String status = null;
+        PullRequestsList response = api.listPullRequests(repository)
+                .prefix(prefix)
+                .after(after)
+                .amount(amount)
+                .status(status)
                 .execute();
         // TODO: test validations
     }
@@ -197,6 +253,20 @@ public class ExperimentalApiTest {
     }
 
     /**
+     * merge pull request
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void mergePullRequestTest() throws ApiException {
+        String repository = null;
+        String pullRequest = null;
+        MergeResult response = api.mergePullRequest(repository, pullRequest)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
      * perform a login with STS
      *
      * @throws ApiException if the Api call fails
@@ -205,6 +275,37 @@ public class ExperimentalApiTest {
     public void stsLoginTest() throws ApiException {
         StsAuthRequest stsAuthRequest = null;
         AuthenticationToken response = api.stsLogin(stsAuthRequest)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
+     * rewrite (all) object metadata
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void updateObjectUserMetadataTest() throws ApiException {
+        String repository = null;
+        String branch = null;
+        String path = null;
+        UpdateObjectUserMetadata updateObjectUserMetadata = null;
+        api.updateObjectUserMetadata(repository, branch, path, updateObjectUserMetadata)
+                .execute();
+        // TODO: test validations
+    }
+
+    /**
+     * update pull request
+     *
+     * @throws ApiException if the Api call fails
+     */
+    @Test
+    public void updatePullRequestTest() throws ApiException {
+        String repository = null;
+        String pullRequest = null;
+        PullRequestBasic pullRequestBasic = null;
+        api.updatePullRequest(repository, pullRequest, pullRequestBasic)
                 .execute();
         // TODO: test validations
     }

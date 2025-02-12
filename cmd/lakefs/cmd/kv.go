@@ -35,7 +35,7 @@ var kvGetCmd = &cobra.Command{
 	Short: "Return the value for the given path under the given partition",
 	Args:  cobra.ExactArgs(GetCmdNumArgs),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg := loadConfig()
+		cfg := loadConfig().GetBaseConfig()
 
 		pretty, err := cmd.Flags().GetBool("pretty")
 		if err != nil {
@@ -43,7 +43,7 @@ var kvGetCmd = &cobra.Command{
 		}
 
 		ctx := cmd.Context()
-		kvParams, err := kvparams.NewConfig(cfg)
+		kvParams, err := kvparams.NewConfig(&cfg.Database)
 		if err != nil {
 			return fmt.Errorf("KV params: %w", err)
 		}
@@ -83,7 +83,7 @@ var kvScanCmd = &cobra.Command{
 	Short: "Scan through keys and values under the given partition. An optional path can be specified as a starting point (inclusive)",
 	Args:  cobra.RangeArgs(ScanCmdMinArgs, ScanCmdMaxArgs),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg := loadConfig()
+		cfg := loadConfig().GetBaseConfig()
 
 		limit, err := cmd.Flags().GetInt("limit")
 		if err != nil {
@@ -109,7 +109,7 @@ var kvScanCmd = &cobra.Command{
 		}
 
 		ctx := cmd.Context()
-		kvParams, err := kvparams.NewConfig(cfg)
+		kvParams, err := kvparams.NewConfig(&cfg.Database)
 		if err != nil {
 			return fmt.Errorf("KV params: %w", err)
 		}

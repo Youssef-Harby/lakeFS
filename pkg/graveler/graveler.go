@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -109,7 +110,7 @@ const (
 //	Type: Branch / Tag / Commit
 //	BranchID: for type ReferenceTypeBranch will hold the branch ID
 //	ResolvedBranchModifier: branch indicator if resolved to a branch the latest commit, staging or none was specified.
-//	CommitID: the commit ID of the branch head,  tag or specific hash.
+//	MergedCommitID: the commit ID of the branch head,  tag or specific hash.
 //	StagingToken: empty if ResolvedBranchModifier is ResolvedBranchModifierCommitted.
 type ResolvedRef struct {
 	Type                   ReferenceType
@@ -191,9 +192,24 @@ type SetOptions struct {
 	MaxTries int
 	// Force set to true will bypass repository read-only protection.
 	Force bool
+	// AllowEmpty set to true will allow committing an empty commit.
+	AllowEmpty bool
+	// Hidden Will create the branch with the hidden property
+	Hidden bool
+	// SquashMerge causes merge commits to be "squashed", losing parent
+	// information about the merged-from branch.
+	SquashMerge bool
 }
 
 type SetOptionsFunc func(opts *SetOptions)
+
+func NewSetOptions(opts []SetOptionsFunc) *SetOptions {
+	options := &SetOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+	return options
+}
 
 func WithIfAbsent(v bool) SetOptionsFunc {
 	return func(opts *SetOptions) {
@@ -207,7 +223,50 @@ func WithForce(v bool) SetOptionsFunc {
 	}
 }
 
+func WithAllowEmpty(v bool) SetOptionsFunc {
+	return func(opts *SetOptions) {
+		opts.AllowEmpty = v
+	}
+}
+
+func WithHidden(v bool) SetOptionsFunc {
+	return func(opts *SetOptions) {
+		opts.Hidden = v
+	}
+}
+
+func WithSquashMerge(v bool) SetOptionsFunc {
+	return func(opts *SetOptions) {
+		opts.SquashMerge = v
+	}
+}
+
+// ListOptions controls list request defaults
+type ListOptions struct {
+	// Shows entities marked as hidden
+	ShowHidden bool
+}
+
+type ListOptionsFunc func(opts *ListOptions)
+
+func NewListOptions(opts []ListOptionsFunc) *ListOptions {
+	options := &ListOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+	return options
+}
+
+func WithShowHidden(v bool) ListOptionsFunc {
+	return func(opts *ListOptions) {
+		opts.ShowHidden = v
+	}
+}
+
 // function/methods receiving the following basic types could assume they passed validation
+
+// StorageID is the storage location identifier
+type StorageID string
 
 // StorageNamespace is the URI to the storage location
 type StorageNamespace string
@@ -244,6 +303,43 @@ type RangeID string
 // ImportID represents an import process id in the ref-store
 type ImportID string
 
+type PullRequestID string
+
+func (id PullRequestID) String() string {
+	return string(id)
+}
+
+// PullUpdateFunc Used to pass validation call back to ref manager for UpdatePullRequest flow
+type PullUpdateFunc func(request *PullRequest) (*PullRequest, error)
+
+type PullRequest struct {
+	CreationDate time.Time
+	Status       PullRequestStatus
+	Title        string
+	Author       string
+	Description  string
+	// Source - source branch of pull request
+	Source string
+	// Destination - destination branch of pull request
+	Destination string
+	// MergedCommitID - The commit ID of the merge commit created during the merge from source to destination. Relevant only for merged PRs
+	MergedCommitID *string
+	// ClosedDate - Closing date of pull request. Relevant only for closed or merged PRs
+	ClosedDate *time.Time
+}
+
+type PullRequestRecord struct {
+	ID PullRequestID
+	PullRequest
+}
+
+type UpdatePullRequest struct {
+	Title          *string
+	Description    *string
+	Status         *string
+	MergedCommitID *string
+}
+
 type ImportStatus struct {
 	ID          ImportID
 	Completed   bool
@@ -262,6 +358,7 @@ type Metadata map[string]string
 
 // Repository represents repository metadata
 type Repository struct {
+	StorageID        StorageID
 	StorageNamespace StorageNamespace
 	CreationDate     time.Time
 	DefaultBranchID  BranchID
@@ -281,8 +378,9 @@ type RepositoryMetadata map[string]string
 
 const MetadataKeyLastImportTimeStamp = ".lakefs.last.import.timestamp"
 
-func NewRepository(storageNamespace StorageNamespace, defaultBranchID BranchID, readOnly bool) Repository {
+func NewRepository(storageID StorageID, storageNamespace StorageNamespace, defaultBranchID BranchID, readOnly bool) Repository {
 	return Repository{
+		StorageID:        storageID,
 		StorageNamespace: storageNamespace,
 		CreationDate:     time.Now().UTC(),
 		DefaultBranchID:  defaultBranchID,
@@ -344,9 +442,9 @@ func (cp CommitParents) AsStringSlice() []string {
 const FirstCommitMsg = "Repository created"
 
 // CommitVersion used to track changes in Commit schema. Each version is change that a constant describes.
-type CommitVersion int
+type CommitVersion int32
 
-type CommitGeneration int64
+type CommitGeneration int32
 
 const (
 	CommitVersionInitial CommitVersion = iota
@@ -400,6 +498,9 @@ type Branch struct {
 	StagingToken StagingToken
 	// SealedTokens - Staging tokens are appended to the front, this allows building the diff iterator easily
 	SealedTokens []StagingToken
+	// CompactedBaseMetaRangeID - the MetaRangeID of the last compaction's
+	CompactedBaseMetaRangeID MetaRangeID
+	Hidden                   bool
 }
 
 // BranchRecord holds BranchID with the associated Branch data
@@ -453,6 +554,14 @@ type CommitParams struct {
 	AllowEmpty      bool
 }
 
+// CommitOverrides is intended to be used by operations
+// that create a new commit based on an existing one,
+// allowing users to provide information about the new commit.
+type CommitOverrides struct {
+	Message  string
+	Metadata Metadata
+}
+
 type GarbageCollectionRunMetadata struct {
 	RunID string
 	// Location of active commits CSV file on object store
@@ -477,6 +586,10 @@ type KeyValueStore interface {
 	// Set stores value on repository / branch by key. nil value is a valid value for tombstone
 	Set(ctx context.Context, repository *RepositoryRecord, branchID BranchID, key Key, value Value, opts ...SetOptionsFunc) error
 
+	// Update atomically runs update on repository / branch by key.  (Of course, if entry
+	// is only on committed, the updated entry will still be created (atomically) on staging.)
+	Update(ctx context.Context, repository *RepositoryRecord, branchID BranchID, key Key, update ValueUpdateFunc, opts ...SetOptionsFunc) error
+
 	// Delete value from repository / branch by key
 	Delete(ctx context.Context, repository *RepositoryRecord, branchID BranchID, key Key, opts ...SetOptionsFunc) error
 
@@ -485,9 +598,6 @@ type KeyValueStore interface {
 
 	// List lists values on repository / ref
 	List(ctx context.Context, repository *RepositoryRecord, ref Ref, batchSize int) (ValueIterator, error)
-
-	// ListStaging returns ValueIterator for branch staging area. Exposed to be used by X in PrepareGCUncommitted
-	ListStaging(ctx context.Context, branch *Branch, batchSize int) (ValueIterator, error)
 }
 
 type VersionController interface {
@@ -495,10 +605,10 @@ type VersionController interface {
 	GetRepository(ctx context.Context, repositoryID RepositoryID) (*RepositoryRecord, error)
 
 	// CreateRepository stores a new Repository under RepositoryID with the given Branch as default branch
-	CreateRepository(ctx context.Context, repositoryID RepositoryID, storageNamespace StorageNamespace, branchID BranchID, readOnly bool) (*RepositoryRecord, error)
+	CreateRepository(ctx context.Context, repositoryID RepositoryID, storageID StorageID, storageNamespace StorageNamespace, branchID BranchID, readOnly bool) (*RepositoryRecord, error)
 
 	// CreateBareRepository stores a new Repository under RepositoryID with no initial branch or commit
-	CreateBareRepository(ctx context.Context, repositoryID RepositoryID, storageNamespace StorageNamespace, defaultBranchID BranchID, readOnly bool) (*RepositoryRecord, error)
+	CreateBareRepository(ctx context.Context, repositoryID RepositoryID, storageID StorageID, storageNamespace StorageNamespace, defaultBranchID BranchID, readOnly bool) (*RepositoryRecord, error)
 
 	// ListRepositories returns iterator to scan repositories
 	ListRepositories(ctx context.Context) (RepositoryIterator, error)
@@ -537,7 +647,7 @@ type VersionController interface {
 	Log(ctx context.Context, repository *RepositoryRecord, commitID CommitID, firstParent bool, since *time.Time) (CommitIterator, error)
 
 	// ListBranches lists branches on repositories
-	ListBranches(ctx context.Context, repository *RepositoryRecord) (BranchIterator, error)
+	ListBranches(ctx context.Context, repository *RepositoryRecord, opts ...ListOptionsFunc) (BranchIterator, error)
 
 	// DeleteBranch deletes branch from repository
 	DeleteBranch(ctx context.Context, repository *RepositoryRecord, branchID BranchID, opts ...SetOptionsFunc) error
@@ -582,10 +692,10 @@ type VersionController interface {
 	ResetPrefix(ctx context.Context, repository *RepositoryRecord, branchID BranchID, key Key, opts ...SetOptionsFunc) error
 
 	// Revert creates a reverse patch to the commit given as 'ref', and applies it as a new commit on the given branch.
-	Revert(ctx context.Context, repository *RepositoryRecord, branchID BranchID, ref Ref, parentNumber int, commitParams CommitParams, opts ...SetOptionsFunc) (CommitID, error)
+	Revert(ctx context.Context, repository *RepositoryRecord, branchID BranchID, ref Ref, parentNumber int, commitParams CommitParams, commitOverrides *CommitOverrides, opts ...SetOptionsFunc) (CommitID, error)
 
 	// CherryPick creates a patch to the commit given as 'ref', and applies it as a new commit on the given branch.
-	CherryPick(ctx context.Context, repository *RepositoryRecord, id BranchID, reference Ref, number *int, committer string, opts ...SetOptionsFunc) (CommitID, error)
+	CherryPick(ctx context.Context, repository *RepositoryRecord, id BranchID, reference Ref, number *int, committer string, commitOverrides *CommitOverrides, opts ...SetOptionsFunc) (CommitID, error)
 
 	// Merge merges 'source' into 'destination' and returns the commit id for the created merge commit.
 	Merge(ctx context.Context, repository *RepositoryRecord, destination BranchID, source Ref, commitParams CommitParams, strategy string, opts ...SetOptionsFunc) (CommitID, error)
@@ -687,6 +797,21 @@ type Loader interface {
 	LoadTags(ctx context.Context, repository *RepositoryRecord, metaRangeID MetaRangeID, opts ...SetOptionsFunc) error
 }
 
+// Collaborator TODO (niro): This should eventually exist in a separate service
+type Collaborator interface {
+	// GetPullRequest returns pull request by ID
+	GetPullRequest(ctx context.Context, repository *RepositoryRecord, pullRequestID PullRequestID) (*PullRequest, error)
+
+	// CreatePullRequest creates a pull request on a repository for the given source and destination branches
+	CreatePullRequest(ctx context.Context, repository *RepositoryRecord, pullRequest *PullRequestRecord) error
+
+	// ListPullRequests lists pull requests on repository
+	ListPullRequests(ctx context.Context, repository *RepositoryRecord) (PullsIterator, error)
+
+	// UpdatePullRequest update pull request in the given repository
+	UpdatePullRequest(ctx context.Context, repository *RepositoryRecord, pullRequestID PullRequestID, update *UpdatePullRequest) error
+}
+
 // Internal structures used by Graveler
 // xxxIterator used as follows:
 // ```
@@ -760,6 +885,14 @@ type LinkAddressIterator interface {
 	Close()
 }
 
+type PullsIterator interface {
+	Next() bool
+	SeekGE(id PullRequestID)
+	Value() *PullRequestRecord
+	Err() error
+	Close()
+}
+
 // These are the more complex internal components that compose the functionality of the Graveler
 
 // RefManager handles references: branches, commits, probably tags in the future
@@ -808,7 +941,7 @@ type RefManager interface {
 	DeleteBranch(ctx context.Context, repository *RepositoryRecord, branchID BranchID) error
 
 	// ListBranches lists branches
-	ListBranches(ctx context.Context, repository *RepositoryRecord) (BranchIterator, error)
+	ListBranches(ctx context.Context, repository *RepositoryRecord, opts ListOptions) (BranchIterator, error)
 
 	// GCBranchIterator TODO (niro): Remove when DB implementation is deleted
 	// GCBranchIterator temporary WA to support both DB and KV GC BranchIterator, which iterates over branches by order of commit ID
@@ -859,37 +992,47 @@ type RefManager interface {
 
 	// DeleteExpiredImports deletes expired imports on a given repository
 	DeleteExpiredImports(ctx context.Context, repository *RepositoryRecord) error
+
+	GetPullRequest(ctx context.Context, repository *RepositoryRecord, pullID PullRequestID) (*PullRequest, error)
+
+	ListPullRequests(ctx context.Context, repository *RepositoryRecord) (PullsIterator, error)
+
+	CreatePullRequest(ctx context.Context, repository *RepositoryRecord, pullRequestID PullRequestID, pullRequest *PullRequest) error
+
+	DeletePullRequest(ctx context.Context, repository *RepositoryRecord, pullRequestID PullRequestID) error
+
+	UpdatePullRequest(ctx context.Context, repository *RepositoryRecord, pullRequestID PullRequestID, f PullUpdateFunc) error
 }
 
 // CommittedManager reads and applies committed snapshots
 // it is responsible for de-duping them, persisting them and providing basic diff, merge and list capabilities
 type CommittedManager interface {
 	// Get returns the provided key, if exists, from the provided MetaRangeID
-	Get(ctx context.Context, ns StorageNamespace, rangeID MetaRangeID, key Key) (*Value, error)
+	Get(ctx context.Context, storageID StorageID, ns StorageNamespace, rangeID MetaRangeID, key Key) (*Value, error)
 
 	// Exists returns true if a MetaRange matching ID exists in namespace ns.
-	Exists(ctx context.Context, ns StorageNamespace, id MetaRangeID) (bool, error)
+	Exists(ctx context.Context, storageID StorageID, ns StorageNamespace, id MetaRangeID) (bool, error)
 
 	// WriteMetaRangeByIterator flushes the iterator to a new MetaRange and returns the created ID.
-	WriteMetaRangeByIterator(ctx context.Context, ns StorageNamespace, it ValueIterator, metadata Metadata) (*MetaRangeID, error)
+	WriteMetaRangeByIterator(ctx context.Context, storageID StorageID, ns StorageNamespace, it ValueIterator, metadata Metadata) (*MetaRangeID, error)
 
 	// WriteRange creates a new Range from the iterator values.
 	// Keeps Range closing logic, so might not exhaust the iterator.
-	WriteRange(ctx context.Context, ns StorageNamespace, it ValueIterator) (*RangeInfo, error)
+	WriteRange(ctx context.Context, storageID StorageID, ns StorageNamespace, it ValueIterator) (*RangeInfo, error)
 
 	// WriteMetaRange creates a new MetaRange from the given Ranges.
-	WriteMetaRange(ctx context.Context, ns StorageNamespace, ranges []*RangeInfo) (*MetaRangeInfo, error)
+	WriteMetaRange(ctx context.Context, storageID StorageID, ns StorageNamespace, ranges []*RangeInfo) (*MetaRangeInfo, error)
 
 	// List takes a given tree and returns an ValueIterator
-	List(ctx context.Context, ns StorageNamespace, rangeID MetaRangeID) (ValueIterator, error)
+	List(ctx context.Context, storageID StorageID, ns StorageNamespace, rangeID MetaRangeID) (ValueIterator, error)
 
 	// Diff receives two metaRanges and returns a DiffIterator describing all differences between them.
 	// This is similar to a two-dot diff in git (left..right)
-	Diff(ctx context.Context, ns StorageNamespace, left, right MetaRangeID) (DiffIterator, error)
+	Diff(ctx context.Context, storageID StorageID, ns StorageNamespace, left, right MetaRangeID) (DiffIterator, error)
 
 	// Compare returns the difference between 'source' and 'destination', relative to a merge base 'base'.
 	// This is similar to a three-dot diff in git.
-	Compare(ctx context.Context, ns StorageNamespace, destination, source, base MetaRangeID) (DiffIterator, error)
+	Compare(ctx context.Context, storageID StorageID, ns StorageNamespace, destination, source, base MetaRangeID) (DiffIterator, error)
 
 	// Merge applies changes from 'source' to 'destination', relative to a merge base 'base' and
 	// returns the ID of the new metarange. This is similar to a git merge operation.
@@ -898,12 +1041,12 @@ type CommittedManager interface {
 
 	// Import sync changes from 'source' to 'destination'. All the given prefixes are completely overridden on the resulting metarange. Returns the ID of the new
 	// metarange.
-	Import(ctx context.Context, ns StorageNamespace, destination, source MetaRangeID, prefixes []Prefix, opts ...SetOptionsFunc) (MetaRangeID, error)
+	Import(ctx context.Context, storageID StorageID, ns StorageNamespace, destination, source MetaRangeID, prefixes []Prefix, opts ...SetOptionsFunc) (MetaRangeID, error)
 
 	// Commit is the act of taking an existing metaRange (snapshot) and applying a set of changes to it.
 	// A change is either an entity to write/overwrite, or a tombstone to mark a deletion
 	// it returns a new MetaRangeID that is expected to be immediately addressable
-	Commit(ctx context.Context, ns StorageNamespace, baseMetaRangeID MetaRangeID, changes ValueIterator, allowEmpty bool, opts ...SetOptionsFunc) (MetaRangeID, DiffSummary, error)
+	Commit(ctx context.Context, storageID StorageID, ns StorageNamespace, baseMetaRangeID MetaRangeID, changes ValueIterator, allowEmpty bool, opts ...SetOptionsFunc) (MetaRangeID, DiffSummary, error)
 
 	// GetMetaRange returns information where metarangeID is stored.
 	GetMetaRange(ctx context.Context, ns StorageNamespace, metaRangeID MetaRangeID) (MetaRangeAddress, error)
@@ -911,7 +1054,7 @@ type CommittedManager interface {
 	GetRange(ctx context.Context, ns StorageNamespace, rangeID RangeID) (RangeAddress, error)
 
 	// GetRangeIDByKey returns the RangeID that contains the given key.
-	GetRangeIDByKey(ctx context.Context, ns StorageNamespace, id MetaRangeID, key Key) (RangeID, error)
+	GetRangeIDByKey(ctx context.Context, storageID StorageID, ns StorageNamespace, id MetaRangeID, key Key) (RangeID, error)
 }
 
 // StagingManager manages entries in a staging area, denoted by a staging token
@@ -954,6 +1097,10 @@ type BranchLocker interface {
 }
 
 func (id RepositoryID) String() string {
+	return string(id)
+}
+
+func (id StorageID) String() string {
 	return string(id)
 }
 
@@ -1047,13 +1194,13 @@ func (g *Graveler) GetRepository(ctx context.Context, repositoryID RepositoryID)
 	return g.RefManager.GetRepository(ctx, repositoryID)
 }
 
-func (g *Graveler) CreateRepository(ctx context.Context, repositoryID RepositoryID, storageNamespace StorageNamespace, branchID BranchID, readOnly bool) (*RepositoryRecord, error) {
+func (g *Graveler) CreateRepository(ctx context.Context, repositoryID RepositoryID, storageID StorageID, storageNamespace StorageNamespace, branchID BranchID, readOnly bool) (*RepositoryRecord, error) {
 	_, err := g.RefManager.GetRepository(ctx, repositoryID)
 	if err != nil && !errors.Is(err, ErrRepositoryNotFound) {
 		return nil, err
 	}
 
-	repo := NewRepository(storageNamespace, branchID, readOnly)
+	repo := NewRepository(storageID, storageNamespace, branchID, readOnly)
 	repository, err := g.RefManager.CreateRepository(ctx, repositoryID, repo)
 	if err != nil {
 		return nil, err
@@ -1061,13 +1208,13 @@ func (g *Graveler) CreateRepository(ctx context.Context, repositoryID Repository
 	return repository, nil
 }
 
-func (g *Graveler) CreateBareRepository(ctx context.Context, repositoryID RepositoryID, storageNamespace StorageNamespace, defaultBranchID BranchID, readOnly bool) (*RepositoryRecord, error) {
+func (g *Graveler) CreateBareRepository(ctx context.Context, repositoryID RepositoryID, storageID StorageID, storageNamespace StorageNamespace, defaultBranchID BranchID, readOnly bool) (*RepositoryRecord, error) {
 	_, err := g.RefManager.GetRepository(ctx, repositoryID)
 	if err != nil && !errors.Is(err, ErrRepositoryNotFound) {
 		return nil, err
 	}
 
-	repo := NewRepository(storageNamespace, defaultBranchID, readOnly)
+	repo := NewRepository(storageID, storageNamespace, defaultBranchID, readOnly)
 	repository, err := g.RefManager.CreateBareRepository(ctx, repositoryID, repo)
 	if err != nil {
 		return nil, err
@@ -1092,25 +1239,19 @@ func (g *Graveler) SetRepositoryMetadata(ctx context.Context, repository *Reposi
 }
 
 func (g *Graveler) WriteRange(ctx context.Context, repository *RepositoryRecord, it ValueIterator, opts ...SetOptionsFunc) (*RangeInfo, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return nil, ErrReadOnlyRepository
 	}
-	return g.CommittedManager.WriteRange(ctx, repository.StorageNamespace, it)
+	return g.CommittedManager.WriteRange(ctx, repository.StorageID, repository.StorageNamespace, it)
 }
 
 func (g *Graveler) WriteMetaRange(ctx context.Context, repository *RepositoryRecord, ranges []*RangeInfo, opts ...SetOptionsFunc) (*MetaRangeInfo, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return nil, ErrReadOnlyRepository
 	}
-	return g.CommittedManager.WriteMetaRange(ctx, repository.StorageNamespace, ranges)
+	return g.CommittedManager.WriteMetaRange(ctx, repository.StorageID, repository.StorageNamespace, ranges)
 }
 
 func (g *Graveler) StageObject(ctx context.Context, stagingToken string, object ValueRecord) error {
@@ -1118,14 +1259,11 @@ func (g *Graveler) StageObject(ctx context.Context, stagingToken string, object 
 }
 
 func (g *Graveler) WriteMetaRangeByIterator(ctx context.Context, repository *RepositoryRecord, it ValueIterator, opts ...SetOptionsFunc) (*MetaRangeID, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return nil, ErrReadOnlyRepository
 	}
-	return g.CommittedManager.WriteMetaRangeByIterator(ctx, repository.StorageNamespace, it, nil)
+	return g.CommittedManager.WriteMetaRangeByIterator(ctx, repository.StorageID, repository.StorageNamespace, it, nil)
 }
 
 func (g *Graveler) GetCommit(ctx context.Context, repository *RepositoryRecord, commitID CommitID) (*Commit, error) {
@@ -1138,10 +1276,7 @@ func GenerateStagingToken(repositoryID RepositoryID, branchID BranchID) StagingT
 }
 
 func (g *Graveler) CreateBranch(ctx context.Context, repository *RepositoryRecord, branchID BranchID, ref Ref, opts ...SetOptionsFunc) (*Branch, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return nil, ErrReadOnlyRepository
 	}
@@ -1165,6 +1300,7 @@ func (g *Graveler) CreateBranch(ctx context.Context, repository *RepositoryRecor
 		CommitID:     reference.CommitID,
 		StagingToken: GenerateStagingToken(repository.RepositoryID, branchID),
 		SealedTokens: make([]StagingToken, 0),
+		Hidden:       options.Hidden,
 	}
 	storageNamespace := repository.StorageNamespace
 	var preRunID string
@@ -1210,10 +1346,7 @@ func (g *Graveler) CreateBranch(ctx context.Context, repository *RepositoryRecor
 }
 
 func (g *Graveler) UpdateBranch(ctx context.Context, repository *RepositoryRecord, branchID BranchID, ref Ref, opts ...SetOptionsFunc) (*Branch, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return nil, ErrReadOnlyRepository
 	}
@@ -1283,7 +1416,7 @@ func (g *Graveler) monitorRetries(ctx context.Context, retries int, repositoryID
 // information on the algorithm used.
 func (g *Graveler) prepareForCommitIDUpdate(ctx context.Context, repository *RepositoryRecord, branchID BranchID, operation string) error {
 	return g.retryBranchUpdate(ctx, repository, branchID, func(currBranch *Branch) (*Branch, error) {
-		empty, err := g.isStagingEmpty(ctx, repository, currBranch)
+		empty, err := g.isUncommittedEmpty(ctx, repository, currBranch)
 		if err != nil {
 			return nil, err
 		}
@@ -1306,10 +1439,7 @@ func (g *Graveler) GetTag(ctx context.Context, repository *RepositoryRecord, tag
 }
 
 func (g *Graveler) CreateTag(ctx context.Context, repository *RepositoryRecord, tagID TagID, commitID CommitID, opts ...SetOptionsFunc) error {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -1369,10 +1499,7 @@ func (g *Graveler) CreateTag(ctx context.Context, repository *RepositoryRecord, 
 }
 
 func (g *Graveler) DeleteTag(ctx context.Context, repository *RepositoryRecord, tagID TagID, opts ...SetOptionsFunc) error {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -1450,15 +1577,13 @@ func (g *Graveler) Log(ctx context.Context, repository *RepositoryRecord, commit
 	return g.RefManager.Log(ctx, repository, commitID, firstParent, since)
 }
 
-func (g *Graveler) ListBranches(ctx context.Context, repository *RepositoryRecord) (BranchIterator, error) {
-	return g.RefManager.ListBranches(ctx, repository)
+func (g *Graveler) ListBranches(ctx context.Context, repository *RepositoryRecord, opts ...ListOptionsFunc) (BranchIterator, error) {
+	options := NewListOptions(opts)
+	return g.RefManager.ListBranches(ctx, repository, *options)
 }
 
 func (g *Graveler) DeleteBranch(ctx context.Context, repository *RepositoryRecord, branchID BranchID, opts ...SetOptionsFunc) error {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -1586,7 +1711,7 @@ func (g *Graveler) SetBranchProtectionRules(ctx context.Context, repository *Rep
 // TODO: in most cases it is used by Get flow, assuming that usually the key will be found in committed we need to parallelize the get from tokens
 func (g *Graveler) getFromStagingArea(ctx context.Context, b *Branch, key Key) (*Value, error) {
 	if b.StagingToken == "" {
-		return nil, ErrNotFound
+		return nil, fmt.Errorf("missing staging token: %w", ErrNotFound)
 	}
 	tokens := []StagingToken{b.StagingToken}
 	tokens = append(tokens, b.SealedTokens...)
@@ -1609,18 +1734,24 @@ func (g *Graveler) Get(ctx context.Context, repository *RepositoryRecord, ref Re
 		return nil, err
 	}
 
+	var updatedValue *Value
 	if reference.StagingToken != "" {
 		// try to get from staging, if not found proceed to committed
-		value, err := g.getFromStagingArea(ctx, reference.Branch, key)
+		updatedValue, err = g.getFromStagingArea(ctx, reference.Branch, key)
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
 		}
-		if err == nil {
-			if value == nil {
-				// tombstone - the entry was deleted on the branch => doesn't exist
-				return nil, ErrNotFound
-			}
-			return value, nil
+		// tombstone - the entry was deleted on the branch => doesn't exist
+		if err == nil && updatedValue == nil {
+			return nil, ErrNotFound
+		}
+	}
+
+	if updatedValue == nil && reference.CompactedBaseMetaRangeID != "" {
+		updatedValue, err = g.CommittedManager.Get(ctx, repository.StorageID, repository.StorageNamespace, reference.CompactedBaseMetaRangeID, key)
+		// no need to check for ErrNotFound, since if the key is not found in the compacted base, it will not be found in the committed, and we already checked the staging area
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -1628,17 +1759,35 @@ func (g *Graveler) Get(ctx context.Context, repository *RepositoryRecord, ref Re
 	for _, opt := range opts {
 		opt(&options)
 	}
-	if options.StageOnly {
-		return nil, ErrNotFound
-	}
 
-	// If key is not found in staging area (or reference is not a branch), return the key from committed
 	commitID := reference.CommitID
+	if options.StageOnly {
+		if updatedValue == nil {
+			return nil, ErrNotFound
+		}
+
+		commit, err := g.RefManager.GetCommit(ctx, repository, commitID)
+		if err != nil {
+			return nil, err
+		}
+		committedVal, err := g.CommittedManager.Get(ctx, repository.StorageID, repository.StorageNamespace, commit.MetaRangeID, key)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		// the key we found is committed, return not found in staging
+		if committedVal != nil && bytes.Equal(committedVal.Identity, updatedValue.Identity) {
+			return nil, ErrNotFound
+		}
+	}
+	if updatedValue != nil {
+		return updatedValue, nil
+	}
+	// If key is not found in staging area (or reference is not a branch), return the key from committed
 	commit, err := g.RefManager.GetCommit(ctx, repository, commitID)
 	if err != nil {
 		return nil, err
 	}
-	return g.CommittedManager.Get(ctx, repository.StorageNamespace, commit.MetaRangeID, key)
+	return g.CommittedManager.Get(ctx, repository.StorageID, repository.StorageNamespace, commit.MetaRangeID, key)
 }
 
 func (g *Graveler) GetByCommitID(ctx context.Context, repository *RepositoryRecord, commitID CommitID, key Key) (*Value, error) {
@@ -1647,7 +1796,7 @@ func (g *Graveler) GetByCommitID(ctx context.Context, repository *RepositoryReco
 	if err != nil {
 		return nil, err
 	}
-	return g.CommittedManager.Get(ctx, repository.StorageNamespace, commit.MetaRangeID, key)
+	return g.CommittedManager.Get(ctx, repository.StorageID, repository.StorageNamespace, commit.MetaRangeID, key)
 }
 
 func (g *Graveler) GetRangeIDByKey(ctx context.Context, repository *RepositoryRecord, commitID CommitID, key Key) (RangeID, error) {
@@ -1655,7 +1804,7 @@ func (g *Graveler) GetRangeIDByKey(ctx context.Context, repository *RepositoryRe
 	if err != nil {
 		return "", err
 	}
-	return g.CommittedManager.GetRangeIDByKey(ctx, repository.StorageNamespace, commit.MetaRangeID, key)
+	return g.CommittedManager.GetRangeIDByKey(ctx, repository.StorageID, repository.StorageNamespace, commit.MetaRangeID, key)
 }
 
 func (g *Graveler) Set(ctx context.Context, repository *RepositoryRecord, branchID BranchID, key Key, value Value, opts ...SetOptionsFunc) error {
@@ -1667,10 +1816,7 @@ func (g *Graveler) Set(ctx context.Context, repository *RepositoryRecord, branch
 		return ErrWriteToProtectedBranch
 	}
 
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -1702,8 +1848,7 @@ func (g *Graveler) Set(ctx context.Context, repository *RepositoryRecord, branch
 }
 
 // safeBranchWrite repeatedly attempts to perform stagingOperation, retrying
-// if the staging token changes during the write.  It never backs off.  It
-// returns the number of times it tried -- between 1 and options.MaxTries.
+// if the staging token changes during the write.  It never backs off.
 func (g *Graveler) safeBranchWrite(ctx context.Context, log logging.Logger, repository *RepositoryRecord, branchID BranchID,
 	options safeBranchWriteOptions, stagingOperation func(branch *Branch) error, operation string,
 ) error {
@@ -1750,6 +1895,47 @@ func (g *Graveler) safeBranchWrite(ctx context.Context, log logging.Logger, repo
 	return nil
 }
 
+func (g *Graveler) Update(ctx context.Context, repository *RepositoryRecord, branchID BranchID, key Key, update ValueUpdateFunc, opts ...SetOptionsFunc) error {
+	isProtected, err := g.protectedBranchesManager.IsBlocked(ctx, repository, branchID, BranchProtectionBlockedAction_STAGING_WRITE)
+	if err != nil {
+		return err
+	}
+	if isProtected {
+		return ErrWriteToProtectedBranch
+	}
+
+	options := NewSetOptions(opts)
+	if repository.ReadOnly && !options.Force {
+		return ErrReadOnlyRepository
+	}
+
+	log := g.log(ctx).WithFields(logging.Fields{"key": key, "operation": "update_user_metadata"})
+
+	// committedValue, if non-nil is a value read from either uncommitted or committed.  Usually
+	// it is read from committed.  If there is a value on staging, that entry will be modified
+	// and committedValue will never be read.
+	var committedValue *Value
+
+	err = g.safeBranchWrite(ctx, log, repository, branchID, safeBranchWriteOptions{MaxTries: options.MaxTries}, func(branch *Branch) error {
+		return g.StagingManager.Update(ctx, branch.StagingToken, key, func(currentValue *Value) (*Value, error) {
+			if currentValue == nil {
+				// Object not on staging: need to update committed value.
+				if committedValue == nil {
+					committedValue, err = g.Get(ctx, repository, Ref(branchID), key)
+					if err != nil {
+						// (Includes ErrNotFound)
+						return nil, fmt.Errorf("read from committed: %w", err)
+					}
+				}
+				// Get always returns a non-nil value or an error.
+				currentValue = committedValue
+			}
+			return update(currentValue)
+		})
+	}, "update_metadata")
+	return err
+}
+
 func (g *Graveler) Delete(ctx context.Context, repository *RepositoryRecord, branchID BranchID, key Key, opts ...SetOptionsFunc) error {
 	isProtected, err := g.protectedBranchesManager.IsBlocked(ctx, repository, branchID, BranchProtectionBlockedAction_STAGING_WRITE)
 	if err != nil {
@@ -1759,10 +1945,7 @@ func (g *Graveler) Delete(ctx context.Context, repository *RepositoryRecord, bra
 		return ErrWriteToProtectedBranch
 	}
 
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -1770,7 +1953,7 @@ func (g *Graveler) Delete(ctx context.Context, repository *RepositoryRecord, bra
 	log := g.log(ctx).WithFields(logging.Fields{"key": key, "operation": "delete"})
 	err = g.safeBranchWrite(ctx, log, repository, branchID,
 		safeBranchWriteOptions{}, func(branch *Branch) error {
-			return g.deleteUnsafe(ctx, repository, key, nil, BranchRecord{branchID, branch})
+			return g.deleteUnsafe(ctx, repository, key, BranchRecord{branchID, branch})
 		}, "delete")
 	return err
 }
@@ -1786,10 +1969,7 @@ func (g *Graveler) DeleteBatch(ctx context.Context, repository *RepositoryRecord
 		return ErrWriteToProtectedBranch
 	}
 
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -1801,9 +1981,8 @@ func (g *Graveler) DeleteBatch(ctx context.Context, repository *RepositoryRecord
 	var m *multierror.Error
 	log := g.log(ctx).WithField("operation", "delete_keys")
 	err = g.safeBranchWrite(ctx, log, repository, branchID, safeBranchWriteOptions{}, func(branch *Branch) error {
-		var cachedMetaRangeID MetaRangeID // used to cache the committed branch metarange ID
 		for _, key := range keys {
-			err := g.deleteUnsafe(ctx, repository, key, &cachedMetaRangeID, BranchRecord{branchID, branch})
+			err := g.deleteUnsafe(ctx, repository, key, BranchRecord{branchID, branch})
 			if err != nil {
 				m = multierror.Append(m, &DeleteError{Key: key, Err: err})
 			}
@@ -1813,7 +1992,7 @@ func (g *Graveler) DeleteBatch(ctx context.Context, repository *RepositoryRecord
 	return err
 }
 
-func (g *Graveler) deleteUnsafe(ctx context.Context, repository *RepositoryRecord, key Key, cachedMetaRangeID *MetaRangeID, branchRecord BranchRecord) error {
+func (g *Graveler) deleteUnsafe(ctx context.Context, repository *RepositoryRecord, key Key, branchRecord BranchRecord) error {
 	// First attempt to update on staging token
 	err := g.deleteAndNotify(ctx, repository.RepositoryID, branchRecord, key, true)
 	if !errors.Is(err, kv.ErrPredicateFailed) {
@@ -1822,8 +2001,8 @@ func (g *Graveler) deleteUnsafe(ctx context.Context, repository *RepositoryRecor
 
 	// check key in committed - do we need tombstone?
 	var metaRangeID MetaRangeID
-	if cachedMetaRangeID != nil && *cachedMetaRangeID != "" {
-		metaRangeID = *cachedMetaRangeID
+	if branchRecord.Branch.CompactedBaseMetaRangeID != "" {
+		metaRangeID = branchRecord.Branch.CompactedBaseMetaRangeID
 	} else {
 		commit, err := g.RefManager.GetCommit(ctx, repository, branchRecord.Branch.CommitID)
 		if err != nil {
@@ -1832,7 +2011,7 @@ func (g *Graveler) deleteUnsafe(ctx context.Context, repository *RepositoryRecor
 		metaRangeID = commit.MetaRangeID
 	}
 
-	_, err = g.CommittedManager.Get(ctx, repository.StorageNamespace, metaRangeID, key)
+	_, err = g.CommittedManager.Get(ctx, repository.StorageID, repository.StorageNamespace, metaRangeID, key)
 	if err == nil {
 		// found in committed, set tombstone
 		return g.deleteAndNotify(ctx, repository.RepositoryID, branchRecord, key, false)
@@ -1860,16 +2039,12 @@ func (g *Graveler) deleteUnsafe(ctx context.Context, repository *RepositoryRecor
 	return nil
 }
 
-// ListStaging Exposing listStagingArea to catalog for PrepareGCUncommitted
-func (g *Graveler) ListStaging(ctx context.Context, branch *Branch, batchSize int) (ValueIterator, error) {
-	return g.listStagingArea(ctx, branch, batchSize)
-}
-
-// listStagingArea Returns an iterator which is an aggregation of all changes on all the branch's staging area (staging + sealed)
+// listStagingAreaWithoutCompaction Returns an iterator which is an aggregation of all changes on all the branch's staging area (staging + sealed)
 // for each key in the staging area it will return the latest update for that key (the value that appears in the newest token)
-func (g *Graveler) listStagingArea(ctx context.Context, b *Branch, batchSize int) (ValueIterator, error) {
+// listStagingAreaWithoutCompaction will not return changes that were already compacted and saved in the CompactedBaseMetaRangeID
+func (g *Graveler) listStagingAreaWithoutCompaction(ctx context.Context, b *Branch, batchSize int) (ValueIterator, error) {
 	if b.StagingToken == "" {
-		return nil, ErrNotFound
+		return nil, fmt.Errorf("missing staging token: %w", ErrNotFound)
 	}
 	it := g.StagingManager.List(ctx, b.StagingToken, batchSize)
 
@@ -1904,7 +2079,9 @@ func (g *Graveler) List(ctx context.Context, repository *RepositoryRecord, ref R
 		return nil, err
 	}
 	var metaRangeID MetaRangeID
-	if reference.CommitID != "" {
+	if reference.CompactedBaseMetaRangeID != "" {
+		metaRangeID = reference.CompactedBaseMetaRangeID
+	} else if reference.CommitID != "" {
 		commit, err := g.RefManager.GetCommit(ctx, repository, reference.CommitID)
 		if err != nil {
 			return nil, err
@@ -1912,12 +2089,12 @@ func (g *Graveler) List(ctx context.Context, repository *RepositoryRecord, ref R
 		metaRangeID = commit.MetaRangeID
 	}
 
-	listing, err := g.CommittedManager.List(ctx, repository.StorageNamespace, metaRangeID)
+	listing, err := g.CommittedManager.List(ctx, repository.StorageID, repository.StorageNamespace, metaRangeID)
 	if err != nil {
 		return nil, err
 	}
 	if reference.StagingToken != "" {
-		stagingList, err := g.listStagingArea(ctx, reference.BranchRecord.Branch, batchSize)
+		stagingList, err := g.listStagingAreaWithoutCompaction(ctx, reference.BranchRecord.Branch, batchSize)
 		if err != nil {
 			listing.Close()
 			return nil, err
@@ -1943,10 +2120,7 @@ func (g *Graveler) Commit(ctx context.Context, repository *RepositoryRecord, bra
 		return "", ErrCommitToProtectedBranch
 	}
 
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return "", ErrReadOnlyRepository
 	}
@@ -1954,7 +2128,7 @@ func (g *Graveler) Commit(ctx context.Context, repository *RepositoryRecord, bra
 
 	err = g.RefManager.BranchUpdate(ctx, repository, branchID, func(branch *Branch) (*Branch, error) {
 		if params.SourceMetaRange != nil {
-			empty, err := g.isStagingEmpty(ctx, repository, branch)
+			empty, err := g.isUncommittedEmpty(ctx, repository, branch)
 			if err != nil {
 				return nil, fmt.Errorf("checking empty branch: %w", err)
 			}
@@ -2005,14 +2179,14 @@ func (g *Graveler) Commit(ctx context.Context, repository *RepositoryRecord, bra
 		}
 
 		var branchMetaRangeID MetaRangeID
-		var parentGeneration int
+		var parentGeneration int32
 		if branch.CommitID != "" {
 			branchCommit, err := g.RefManager.GetCommit(ctx, repository, branch.CommitID)
 			if err != nil {
 				return nil, fmt.Errorf("get commit: %w", err)
 			}
 			branchMetaRangeID = branchCommit.MetaRangeID
-			parentGeneration = int(branchCommit.Generation)
+			parentGeneration = int32(branchCommit.Generation)
 		}
 		commit.Generation = CommitGeneration(parentGeneration + 1)
 		if params.SourceMetaRange != nil {
@@ -2031,7 +2205,7 @@ func (g *Graveler) Commit(ctx context.Context, repository *RepositoryRecord, bra
 			}
 			defer changes.Close()
 			// returns err if the commit is empty (no changes)
-			commit.MetaRangeID, _, err = g.CommittedManager.Commit(ctx, storageNamespace, branchMetaRangeID, changes, params.AllowEmpty)
+			commit.MetaRangeID, _, err = g.CommittedManager.Commit(ctx, repository.StorageID, storageNamespace, branchMetaRangeID, changes, params.AllowEmpty)
 			if err != nil {
 				return nil, fmt.Errorf("commit: %w", err)
 			}
@@ -2078,10 +2252,7 @@ func (g *Graveler) Commit(ctx context.Context, repository *RepositoryRecord, bra
 }
 
 func (g *Graveler) CreateCommitRecord(ctx context.Context, repository *RepositoryRecord, commitID CommitID, commit Commit, opts ...SetOptionsFunc) error {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -2149,10 +2320,7 @@ func CommitExists(ctx context.Context, repository *RepositoryRecord, commitID Co
 }
 
 func (g *Graveler) AddCommit(ctx context.Context, repository *RepositoryRecord, commit Commit, opts ...SetOptionsFunc) (CommitID, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return "", ErrReadOnlyRepository
 	}
@@ -2185,7 +2353,7 @@ func (g *Graveler) AddCommit(ctx context.Context, repository *RepositoryRecord, 
 // addCommitNoLock lower API used to add commit into a repository. It will verify that the commit meta-range is accessible but will not lock any metadata update.
 func (g *Graveler) addCommitNoLock(ctx context.Context, repository *RepositoryRecord, commit Commit) (CommitID, error) {
 	// verify access to meta range
-	ok, err := g.CommittedManager.Exists(ctx, repository.StorageNamespace, commit.MetaRangeID)
+	ok, err := g.CommittedManager.Exists(ctx, repository.StorageID, repository.StorageNamespace, commit.MetaRangeID)
 	if err != nil {
 		return "", fmt.Errorf("checking for meta range %s: %w", commit.MetaRangeID, err)
 	}
@@ -2201,15 +2369,14 @@ func (g *Graveler) addCommitNoLock(ctx context.Context, repository *RepositoryRe
 	return commitID, nil
 }
 
-func (g *Graveler) isStagingEmpty(ctx context.Context, repository *RepositoryRecord, branch *Branch) (bool, error) {
-	itr, err := g.listStagingArea(ctx, branch, 1)
+func (g *Graveler) isUncommittedEmpty(ctx context.Context, repository *RepositoryRecord, branch *Branch) (bool, error) {
+	diffIt, err := g.diffUncommitted(ctx, repository, branch)
 	if err != nil {
 		return false, err
 	}
-	defer itr.Close()
+	defer diffIt.Close()
 
-	// Iterating over staging area (staging + sealed) of the branch and check for entries
-	return g.checkEmpty(ctx, repository, branch, itr)
+	return !diffIt.Next(), nil
 }
 
 // checkEmpty - staging iterator is not considered empty IFF it contains any non-tombstone entry
@@ -2219,7 +2386,7 @@ func (g *Graveler) checkEmpty(ctx context.Context, repository *RepositoryRecord,
 	if err != nil {
 		return false, err
 	}
-	committedList, err := g.CommittedManager.List(ctx, repository.StorageNamespace, commit.MetaRangeID)
+	committedList, err := g.CommittedManager.List(ctx, repository.StorageID, repository.StorageNamespace, commit.MetaRangeID)
 	if err != nil {
 		return false, err
 	}
@@ -2268,10 +2435,7 @@ func (g *Graveler) ResetHard(ctx context.Context, repository *RepositoryRecord, 
 		return ErrWriteToProtectedBranch
 	}
 
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
@@ -2325,10 +2489,7 @@ func (g *Graveler) Reset(ctx context.Context, repository *RepositoryRecord, bran
 		return ErrWriteToProtectedBranch
 	}
 
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -2367,7 +2528,7 @@ func (g *Graveler) deleteAndNotify(ctx context.Context, repositoryID RepositoryI
 // resetKey resets given key on branch
 // Since we cannot (will not) modify sealed tokens data, we overwrite changes done on entry on a new staging token, effectively reverting it
 // to the current state in the branch committed data. If entry is not committed return an error
-func (g *Graveler) resetKey(ctx context.Context, repository *RepositoryRecord, branchID BranchID, branch *Branch, key Key, stagedValue *Value, st StagingToken) error {
+func (g *Graveler) resetKey(ctx context.Context, repository *RepositoryRecord, branchID BranchID, branch *Branch, key Key, uncommittedValue *Value, st StagingToken) error {
 	isCommitted := true
 	committed, err := g.Get(ctx, repository, branch.CommitID.Ref(), key)
 	if err != nil {
@@ -2378,13 +2539,13 @@ func (g *Graveler) resetKey(ctx context.Context, repository *RepositoryRecord, b
 	}
 
 	if isCommitted { // entry committed and changed in staging area => override with entry from commit
-		if stagedValue != nil && bytes.Equal(committed.Identity, stagedValue.Identity) {
+		if uncommittedValue != nil && bytes.Equal(committed.Identity, uncommittedValue.Identity) {
 			return nil // No change
 		}
 		return g.StagingManager.Set(ctx, st, key, committed, false)
 		// entry not committed and changed in staging area => override with tombstone
 		// If not committed and staging == tombstone => ignore
-	} else if !isCommitted && stagedValue != nil {
+	} else if uncommittedValue != nil {
 		return g.deleteAndNotify(ctx, repository.RepositoryID, BranchRecord{branchID, branch}, key, false)
 	}
 
@@ -2400,10 +2561,7 @@ func (g *Graveler) ResetKey(ctx context.Context, repository *RepositoryRecord, b
 		return ErrWriteToProtectedBranch
 	}
 
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -2413,15 +2571,24 @@ func (g *Graveler) ResetKey(ctx context.Context, repository *RepositoryRecord, b
 		return fmt.Errorf("getting branch: %w", err)
 	}
 
-	staged, err := g.getFromStagingArea(ctx, branch, key)
+	uncommittedValue, err := g.getFromStagingArea(ctx, branch, key)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) { // If key is not in staging => nothing to do
+		if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if branch.CompactedBaseMetaRangeID != "" {
+			uncommittedValue, err = g.CommittedManager.Get(ctx, repository.StorageID, repository.StorageNamespace, branch.CompactedBaseMetaRangeID, key)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return err
+			}
+		}
+		// If key is not in staging nor compacted => nothing to do
+		if uncommittedValue == nil {
 			return nil
 		}
-		return err
 	}
 
-	err = g.resetKey(ctx, repository, branchID, branch, key, staged, branch.StagingToken)
+	err = g.resetKey(ctx, repository, branchID, branch, key, uncommittedValue, branch.StagingToken)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) { // Not found in staging => ignore
 			return err
@@ -2444,10 +2611,7 @@ func (g *Graveler) ResetPrefix(ctx context.Context, repository *RepositoryRecord
 		return ErrWriteToProtectedBranch
 	}
 
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
@@ -2460,8 +2624,8 @@ func (g *Graveler) ResetPrefix(ctx context.Context, repository *RepositoryRecord
 		newSealedTokens = []StagingToken{branch.StagingToken}
 		newSealedTokens = append(newSealedTokens, branch.SealedTokens...)
 
-		// Reset keys by prefix on the new staging token
-		itr, err := g.listStagingArea(ctx, branch, 0)
+		// Reset keys by prefix on the uncommitted entries
+		itr, err := g.DiffUncommitted(ctx, repository, branchID)
 		if err != nil {
 			return nil, err
 		}
@@ -2508,11 +2672,8 @@ type CommitIDAndSummary struct {
 // To revert C2, we merge C1 into the branch, with C2 as the merge base.
 // That is, try to apply the diff from C2 to C1 on the tip of the branch.
 // If the commit is a merge commit, 'parentNumber' is the parent number (1-based) relative to which the revert is done.
-func (g *Graveler) Revert(ctx context.Context, repository *RepositoryRecord, branchID BranchID, ref Ref, parentNumber int, commitParams CommitParams, opts ...SetOptionsFunc) (CommitID, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+func (g *Graveler) Revert(ctx context.Context, repository *RepositoryRecord, branchID BranchID, ref Ref, parentNumber int, commitParams CommitParams, commitOverrides *CommitOverrides, opts ...SetOptionsFunc) (CommitID, error) {
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return "", ErrReadOnlyRepository
 	}
@@ -2575,6 +2736,8 @@ func (g *Graveler) Revert(ctx context.Context, repository *RepositoryRecord, bra
 		commit.Parents = []CommitID{branch.CommitID}
 		commit.Metadata = commitParams.Metadata
 		commit.Generation = branchCommit.Generation + 1
+
+		applyCommitOverrides(&commit, commitOverrides)
 		commitID, err = g.RefManager.AddCommit(ctx, repository, commit)
 		if err != nil {
 			return nil, fmt.Errorf("add commit: %w", err)
@@ -2595,11 +2758,8 @@ func (g *Graveler) Revert(ctx context.Context, repository *RepositoryRecord, bra
 
 // CherryPick creates a new commit on the given branch, with the changes from the given commit.
 // If the commit is a merge commit, 'parentNumber' is the parent number (1-based) relative to which the cherry-pick is done.
-func (g *Graveler) CherryPick(ctx context.Context, repository *RepositoryRecord, branchID BranchID, ref Ref, parentNumber *int, committer string, opts ...SetOptionsFunc) (CommitID, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+func (g *Graveler) CherryPick(ctx context.Context, repository *RepositoryRecord, branchID BranchID, ref Ref, parentNumber *int, committer string, commitOverrides *CommitOverrides, opts ...SetOptionsFunc) (CommitID, error) {
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return "", ErrReadOnlyRepository
 	}
@@ -2664,8 +2824,13 @@ func (g *Graveler) CherryPick(ctx context.Context, repository *RepositoryRecord,
 		commit.MetaRangeID = metaRangeID
 		commit.Parents = []CommitID{branch.CommitID}
 		commit.Generation = branchCommit.Generation + 1
-
 		commit.Metadata = commitRecord.Metadata
+
+		// important: apply overrides before adding our own metadata fields,
+		// because otherwise, the metadata will be potentially overwritten, removing
+		// the cherry-pick related keys.
+		applyCommitOverrides(&commit, commitOverrides)
+
 		if commit.Metadata == nil {
 			commit.Metadata = make(map[string]string)
 		}
@@ -2690,11 +2855,21 @@ func (g *Graveler) CherryPick(ctx context.Context, repository *RepositoryRecord,
 	return commitID, nil
 }
 
-func (g *Graveler) Merge(ctx context.Context, repository *RepositoryRecord, destination BranchID, source Ref, commitParams CommitParams, strategy string, opts ...SetOptionsFunc) (CommitID, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
+func applyCommitOverrides(commit *Commit, commitOverrides *CommitOverrides) {
+	if commitOverrides == nil {
+		return
 	}
+	if commitOverrides.Message != "" {
+		commit.Message = commitOverrides.Message
+	}
+
+	if commitOverrides.Metadata != nil {
+		commit.Metadata = commitOverrides.Metadata
+	}
+}
+
+func (g *Graveler) Merge(ctx context.Context, repository *RepositoryRecord, destination BranchID, source Ref, commitParams CommitParams, strategy string, opts ...SetOptionsFunc) (CommitID, error) {
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return "", ErrReadOnlyRepository
 	}
@@ -2758,7 +2933,7 @@ func (g *Graveler) Merge(ctx context.Context, repository *RepositoryRecord, dest
 			return nil, ErrInvalidMergeStrategy
 		}
 
-		metaRangeID, err := g.CommittedManager.Merge(ctx, storageNamespace, toCommit.MetaRangeID, fromCommit.MetaRangeID, baseCommit.MetaRangeID, mergeStrategy)
+		metaRangeID, err := g.CommittedManager.Merge(ctx, storageNamespace, toCommit.MetaRangeID, fromCommit.MetaRangeID, baseCommit.MetaRangeID, mergeStrategy, opts...)
 		if err != nil {
 			if !errors.Is(err, ErrUserVisible) {
 				err = fmt.Errorf("merge in CommitManager: %w", err)
@@ -2769,7 +2944,11 @@ func (g *Graveler) Merge(ctx context.Context, repository *RepositoryRecord, dest
 		commit.Committer = commitParams.Committer
 		commit.Message = commitParams.Message
 		commit.MetaRangeID = metaRangeID
-		commit.Parents = []CommitID{toCommit.CommitID, fromCommit.CommitID}
+		if options.SquashMerge {
+			commit.Parents = []CommitID{toCommit.CommitID}
+		} else {
+			commit.Parents = []CommitID{toCommit.CommitID, fromCommit.CommitID}
+		}
 		if toCommit.Generation > fromCommit.Generation {
 			commit.Generation = toCommit.Generation + 1
 		} else {
@@ -2864,10 +3043,7 @@ func (g *Graveler) retryRepoMetadataUpdate(ctx context.Context, repository *Repo
 }
 
 func (g *Graveler) Import(ctx context.Context, repository *RepositoryRecord, destination BranchID, source MetaRangeID, commitParams CommitParams, prefixes []Prefix, opts ...SetOptionsFunc) (CommitID, error) {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return "", ErrReadOnlyRepository
 	}
@@ -2908,7 +3084,7 @@ func (g *Graveler) Import(ctx context.Context, repository *RepositoryRecord, des
 			"destination_meta_range": toCommit.MetaRangeID,
 		}).Trace("Import")
 
-		metaRangeID, err := g.CommittedManager.Import(ctx, storageNamespace, toCommit.MetaRangeID, source, prefixes)
+		metaRangeID, err := g.CommittedManager.Import(ctx, repository.StorageID, storageNamespace, toCommit.MetaRangeID, source, prefixes)
 		if err != nil {
 			if !errors.Is(err, ErrUserVisible) {
 				err = fmt.Errorf("merge in CommitManager: %w", err)
@@ -2998,28 +3174,36 @@ func (g *Graveler) DiffUncommitted(ctx context.Context, repository *RepositoryRe
 	if err != nil {
 		return nil, err
 	}
-	var metaRangeID MetaRangeID
-	if branch.CommitID != "" {
-		commit, err := g.RefManager.GetCommit(ctx, repository, branch.CommitID)
-		if err != nil {
-			return nil, err
-		}
-		metaRangeID = commit.MetaRangeID
-	}
+	return g.diffUncommitted(ctx, repository, branch)
+}
 
-	valueIterator, err := g.listStagingArea(ctx, branch, 0)
+func (g *Graveler) diffUncommitted(ctx context.Context, repository *RepositoryRecord, branch *Branch) (DiffIterator, error) {
+	commit, err := g.RefManager.GetCommit(ctx, repository, branch.CommitID)
 	if err != nil {
 		return nil, err
 	}
-	var committedValueIterator ValueIterator
-	if metaRangeID != "" {
-		committedValueIterator, err = g.CommittedManager.List(ctx, repository.StorageNamespace, metaRangeID)
-		if err != nil {
-			valueIterator.Close()
-			return nil, err
-		}
+	metaRangeID := commit.MetaRangeID
+
+	valueIterator, err := g.listStagingAreaWithoutCompaction(ctx, branch, 0)
+	if err != nil {
+		return nil, err
 	}
-	return NewUncommittedDiffIterator(ctx, committedValueIterator, valueIterator), nil
+	committedValueIterator, err := g.CommittedManager.List(ctx, repository.StorageID, repository.StorageNamespace, metaRangeID)
+	if err != nil {
+		valueIterator.Close()
+		return nil, err
+	}
+	if branch.CompactedBaseMetaRangeID == "" {
+		return NewUncommittedDiffIterator(ctx, committedValueIterator, valueIterator), nil
+	}
+	// return the diff of staging + sealed from committed on top of the diff of compacted from committed
+	diffCommitAndCompacted, err := g.CommittedManager.Diff(ctx, repository.StorageID, repository.StorageNamespace, metaRangeID, branch.CompactedBaseMetaRangeID)
+	if err != nil {
+		valueIterator.Close()
+		committedValueIterator.Close()
+		return nil, err
+	}
+	return NewJoinedDiffIterator(NewUncommittedDiffIterator(ctx, committedValueIterator, valueIterator), diffCommitAndCompacted), nil
 }
 
 // dereferenceCommit will dereference and load the commit record based on 'ref'.
@@ -3056,14 +3240,14 @@ func (g *Graveler) Diff(ctx context.Context, repository *RepositoryRecord, left,
 	if err != nil {
 		return nil, err
 	}
-	diff, err := g.CommittedManager.Diff(ctx, repository.StorageNamespace, leftCommit.MetaRangeID, rightCommit.MetaRangeID)
+	diff, err := g.CommittedManager.Diff(ctx, repository.StorageID, repository.StorageNamespace, leftCommit.MetaRangeID, rightCommit.MetaRangeID)
 	if err != nil {
 		return nil, err
 	}
 	if rightRawRef.ResolvedBranchModifier != ResolvedBranchModifierStaging {
 		return diff, nil
 	}
-	leftValueIterator, err := g.CommittedManager.List(ctx, repository.StorageNamespace, leftCommit.MetaRangeID)
+	leftValueIterator, err := g.CommittedManager.List(ctx, repository.StorageID, repository.StorageNamespace, leftCommit.MetaRangeID)
 	if err != nil {
 		return nil, err
 	}
@@ -3073,12 +3257,22 @@ func (g *Graveler) Diff(ctx context.Context, repository *RepositoryRecord, left,
 		leftValueIterator.Close()
 		return nil, err
 	}
-	stagingIterator, err := g.listStagingArea(ctx, rightBranch, 0)
+	stagingIterator, err := g.listStagingAreaWithoutCompaction(ctx, rightBranch, 0)
 	if err != nil {
 		leftValueIterator.Close()
 		return nil, err
 	}
-	return NewCombinedDiffIterator(diff, leftValueIterator, stagingIterator), nil
+	if rightBranch.CompactedBaseMetaRangeID == "" {
+		return NewCombinedDiffIterator(diff, leftValueIterator, stagingIterator), nil
+	}
+	diff.Close()
+	compactedDiffIterator, err := g.CommittedManager.Diff(ctx, repository.StorageID, repository.StorageNamespace, leftCommit.MetaRangeID, rightBranch.CompactedBaseMetaRangeID)
+	if err != nil {
+		leftValueIterator.Close()
+		stagingIterator.Close()
+		return nil, err
+	}
+	return NewCombinedDiffIterator(compactedDiffIterator, leftValueIterator, stagingIterator), nil
 }
 
 func (g *Graveler) FindMergeBase(ctx context.Context, repository *RepositoryRecord, from Ref, to Ref) (*CommitRecord, *CommitRecord, *Commit, error) {
@@ -3105,7 +3299,7 @@ func (g *Graveler) Compare(ctx context.Context, repository *RepositoryRecord, le
 	if err != nil {
 		return nil, err
 	}
-	return g.CommittedManager.Compare(ctx, repository.StorageNamespace, toCommit.MetaRangeID, fromCommit.MetaRangeID, baseCommit.MetaRangeID)
+	return g.CommittedManager.Compare(ctx, repository.StorageID, repository.StorageNamespace, toCommit.MetaRangeID, fromCommit.MetaRangeID, baseCommit.MetaRangeID)
 }
 
 func (g *Graveler) SetHooksHandler(handler HooksHandler) {
@@ -3117,15 +3311,12 @@ func (g *Graveler) SetHooksHandler(handler HooksHandler) {
 }
 
 func (g *Graveler) LoadCommits(ctx context.Context, repository *RepositoryRecord, metaRangeID MetaRangeID, opts ...SetOptionsFunc) error {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
 
-	iter, err := g.CommittedManager.List(ctx, repository.StorageNamespace, metaRangeID)
+	iter, err := g.CommittedManager.List(ctx, repository.StorageID, repository.StorageNamespace, metaRangeID)
 	if err != nil {
 		return err
 	}
@@ -3169,14 +3360,11 @@ func (g *Graveler) LoadCommits(ctx context.Context, repository *RepositoryRecord
 }
 
 func (g *Graveler) LoadBranches(ctx context.Context, repository *RepositoryRecord, metaRangeID MetaRangeID, opts ...SetOptionsFunc) error {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
-	iter, err := g.CommittedManager.List(ctx, repository.StorageNamespace, metaRangeID)
+	iter, err := g.CommittedManager.List(ctx, repository.StorageID, repository.StorageNamespace, metaRangeID)
 	if err != nil {
 		return err
 	}
@@ -3205,14 +3393,11 @@ func (g *Graveler) LoadBranches(ctx context.Context, repository *RepositoryRecor
 }
 
 func (g *Graveler) LoadTags(ctx context.Context, repository *RepositoryRecord, metaRangeID MetaRangeID, opts ...SetOptionsFunc) error {
-	options := &SetOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := NewSetOptions(opts)
 	if repository.ReadOnly && !options.Force {
 		return ErrReadOnlyRepository
 	}
-	iter, err := g.CommittedManager.List(ctx, repository.StorageNamespace, metaRangeID)
+	iter, err := g.CommittedManager.List(ctx, repository.StorageID, repository.StorageNamespace, metaRangeID)
 	if err != nil {
 		return err
 	}
@@ -3251,7 +3436,7 @@ func (g *Graveler) DumpCommits(ctx context.Context, repository *RepositoryRecord
 	if err != nil {
 		return nil, err
 	}
-	return g.CommittedManager.WriteMetaRangeByIterator(ctx, repository.StorageNamespace,
+	return g.CommittedManager.WriteMetaRangeByIterator(ctx, repository.StorageID, repository.StorageNamespace,
 		commitsToValueIterator(iter),
 		Metadata{
 			EntityTypeKey:             EntityTypeCommit,
@@ -3262,7 +3447,7 @@ func (g *Graveler) DumpCommits(ctx context.Context, repository *RepositoryRecord
 }
 
 func (g *Graveler) DumpBranches(ctx context.Context, repository *RepositoryRecord) (*MetaRangeID, error) {
-	iter, err := g.RefManager.ListBranches(ctx, repository)
+	iter, err := g.RefManager.ListBranches(ctx, repository, ListOptions{ShowHidden: true})
 	if err != nil {
 		return nil, err
 	}
@@ -3271,7 +3456,7 @@ func (g *Graveler) DumpBranches(ctx context.Context, repository *RepositoryRecor
 	if err != nil {
 		return nil, err
 	}
-	return g.CommittedManager.WriteMetaRangeByIterator(ctx, repository.StorageNamespace,
+	return g.CommittedManager.WriteMetaRangeByIterator(ctx, repository.StorageID, repository.StorageNamespace,
 		branchesToValueIterator(iter),
 		Metadata{
 			EntityTypeKey:             EntityTypeBranch,
@@ -3291,7 +3476,7 @@ func (g *Graveler) DumpTags(ctx context.Context, repository *RepositoryRecord) (
 	if err != nil {
 		return nil, err
 	}
-	return g.CommittedManager.WriteMetaRangeByIterator(ctx, repository.StorageNamespace,
+	return g.CommittedManager.WriteMetaRangeByIterator(ctx, repository.StorageID, repository.StorageNamespace,
 		tagsToValueIterator(iter),
 		Metadata{
 			EntityTypeKey:             EntityTypeTag,
@@ -3303,6 +3488,62 @@ func (g *Graveler) DumpTags(ctx context.Context, repository *RepositoryRecord) (
 
 func (g *Graveler) DeleteExpiredImports(ctx context.Context, repository *RepositoryRecord) error {
 	return g.RefManager.DeleteExpiredImports(ctx, repository)
+}
+
+func (g *Graveler) GetPullRequest(ctx context.Context, repository *RepositoryRecord, pullRequestID PullRequestID) (*PullRequest, error) {
+	return g.RefManager.GetPullRequest(ctx, repository, pullRequestID)
+}
+
+func (g *Graveler) CreatePullRequest(ctx context.Context, repository *RepositoryRecord, record *PullRequestRecord) error {
+	return g.RefManager.CreatePullRequest(ctx, repository, record.ID, &record.PullRequest)
+}
+
+func (g *Graveler) ListPullRequests(ctx context.Context, repository *RepositoryRecord) (PullsIterator, error) {
+	return g.RefManager.ListPullRequests(ctx, repository)
+}
+
+func pullRequestStatusFromString(s string) (PullRequestStatus, error) {
+	status, ok := PullRequestStatus_value[strings.ToUpper(s)]
+	if !ok {
+		return -1, ErrInvalidPullRequestStatus
+	}
+	return PullRequestStatus(status), nil
+}
+
+func isPullClosed(status PullRequestStatus) bool {
+	return status == PullRequestStatus_CLOSED || status == PullRequestStatus_MERGED
+}
+
+func (g *Graveler) UpdatePullRequest(ctx context.Context, repository *RepositoryRecord, pullRequestID PullRequestID, update *UpdatePullRequest) error {
+	pr, err := g.RefManager.GetPullRequest(ctx, repository, pullRequestID)
+	if err != nil {
+		return err
+	}
+
+	err = g.RefManager.UpdatePullRequest(ctx, repository, pullRequestID, func(request *PullRequest) (*PullRequest, error) {
+		if update.Title != nil {
+			pr.Title = *update.Title
+		}
+		if update.Description != nil {
+			pr.Description = *update.Description
+		}
+		if update.Status != nil {
+			status, err := pullRequestStatusFromString(*update.Status)
+			if err != nil {
+				return nil, err
+			}
+			pr.Status = status
+			if isPullClosed(status) {
+				now := time.Now()
+				pr.ClosedDate = &now
+			}
+		}
+		if update.MergedCommitID != nil {
+			pr.MergedCommitID = update.MergedCommitID
+		}
+		return pr, nil
+	})
+	return err
 }
 
 func tagsToValueIterator(src TagIterator) ValueIterator {
@@ -3456,7 +3697,7 @@ func (c *commitValueIterator) setValue() bool {
 	}
 	commit := c.src.Value()
 	data, err := proto.Marshal(&CommitData{
-		Version:      int32(commit.Version),
+		Version:      int32(commit.Version), //nolint:gosec
 		Id:           string(commit.CommitID),
 		Committer:    commit.Committer,
 		Message:      commit.Message,

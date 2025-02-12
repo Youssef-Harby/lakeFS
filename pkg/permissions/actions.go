@@ -27,7 +27,6 @@ const (
 	DeleteObjectAction                        = "fs:DeleteObject"
 	ListObjectsAction                         = "fs:ListObjects"
 	CreateCommitAction                        = "fs:CreateCommit"
-	CreateMetaRangeAction                     = "fs:CreateMetaRange"
 	ReadCommitAction                          = "fs:ReadCommit"
 	ListCommitsAction                         = "fs:ListCommits"
 	CreateBranchAction                        = "fs:CreateBranch"
@@ -71,6 +70,9 @@ const (
 	PrepareGarbageCollectionUncommittedAction = "retention:PrepareGarbageCollectionUncommitted"
 	GetBranchProtectionRulesAction            = "branches:GetBranchProtectionRules"
 	SetBranchProtectionRulesAction            = "branches:SetBranchProtectionRules"
+	ReadPullReqeustAction                     = "pr:ReadPullRequest"
+	WritePullReqeustAction                    = "pr:WritePullRequest"
+	ListPullRequestsAction                    = "pr:ListPullRequests"
 )
 
 var serviceSet = map[string]struct{}{
@@ -79,6 +81,7 @@ var serviceSet = map[string]struct{}{
 	"ci":        {},
 	"retention": {},
 	"branches":  {},
+	"pr":        {},
 }
 
 func IsValidAction(name string) error {

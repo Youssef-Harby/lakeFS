@@ -10,7 +10,9 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/treeverse/lakefs/pkg/batch"
 	"github.com/treeverse/lakefs/pkg/cache"
+	"github.com/treeverse/lakefs/pkg/distributed"
 	"github.com/treeverse/lakefs/pkg/graveler"
+	"github.com/treeverse/lakefs/pkg/httputil"
 	"github.com/treeverse/lakefs/pkg/ident"
 	"github.com/treeverse/lakefs/pkg/kv"
 	"github.com/treeverse/lakefs/pkg/logging"
@@ -37,6 +39,7 @@ type Manager struct {
 	repoCache       cache.Cache
 	commitCache     cache.Cache
 	maxBatchDelay   time.Duration
+	branchOwnership *distributed.MostlyCorrectOwner
 }
 
 func branchFromProto(pb *graveler.BranchData) *graveler.Branch {
@@ -48,6 +51,7 @@ func branchFromProto(pb *graveler.BranchData) *graveler.Branch {
 		CommitID:     graveler.CommitID(pb.CommitId),
 		StagingToken: graveler.StagingToken(pb.StagingToken),
 		SealedTokens: sealedTokens,
+		Hidden:       pb.Hidden,
 	}
 	return branch
 }
@@ -62,21 +66,61 @@ func protoFromBranch(branchID graveler.BranchID, b *graveler.Branch) *graveler.B
 		CommitId:     b.CommitID.String(),
 		StagingToken: b.StagingToken.String(),
 		SealedTokens: sealedTokens,
+		Hidden:       b.Hidden,
 	}
 	return branch
 }
 
+// BranchApproximateOwnershipParams configures mostly-correct ownership of
+// branches.  Branch correctness is safe _regardless_ of the values of these
+// parameters.  They exist solely to reduce expensive operations when
+// multiple concurrent updates race on the same branch.  Only one update can
+// win a race.  Approximately correct ownership means others will generally
+// back off and let that one update proceed.
+type BranchApproximateOwnershipParams struct {
+	// AcquireInterval is the interval at which to attempt to acquire
+	// ownership of a branch.  It is a bound on the latency of the time
+	// for one worker to acquire a branch when multiple operations race
+	// on that branch.  Reducing it increases read load on the branch
+	// ownership record when concurrent operations occur.
+	AcquireInterval time.Duration
+	// RefreshInterval the interval for which to assert ownership of a
+	// branch.  It is a bound on the time to perform an operation on a
+	// branch IF a previous worker crashed while owning that branch.  It
+	// has no effect when there are no crashes.  Reducing it increases
+	// write load on the branch ownership record when concurrent
+	// operations occur.
+	//
+	// If zero or negative, ownership will not be asserted and branch
+	// operations will race.  This is safe but can be slow.
+	RefreshInterval time.Duration
+}
+
 type ManagerConfig struct {
-	Executor              batch.Batcher
-	KVStore               kv.Store
-	KVStoreLimited        kv.Store
-	AddressProvider       ident.AddressProvider
-	RepositoryCacheConfig CacheConfig
-	CommitCacheConfig     CacheConfig
-	MaxBatchDelay         time.Duration
+	Executor                         batch.Batcher
+	KVStore                          kv.Store
+	KVStoreLimited                   kv.Store
+	AddressProvider                  ident.AddressProvider
+	RepositoryCacheConfig            CacheConfig
+	CommitCacheConfig                CacheConfig
+	MaxBatchDelay                    time.Duration
+	BranchApproximateOwnershipParams BranchApproximateOwnershipParams
 }
 
 func NewRefManager(cfg ManagerConfig) *Manager {
+	var branchOwnership *distributed.MostlyCorrectOwner
+	if cfg.BranchApproximateOwnershipParams.RefreshInterval > 0 {
+		log := logging.ContextUnavailable().WithField("component", "RefManager approximate branch ownership")
+		branchOwnership = distributed.NewMostlyCorrectOwner(
+			log,
+			cfg.KVStore,
+			"run-refs/approximate-branch-owner",
+			cfg.BranchApproximateOwnershipParams.AcquireInterval,
+			cfg.BranchApproximateOwnershipParams.RefreshInterval,
+		)
+		log.Info("Initialized")
+	}
+
 	return &Manager{
 		kvStore:         cfg.KVStore,
 		kvStoreLimited:  cfg.KVStoreLimited,
@@ -85,6 +129,7 @@ func NewRefManager(cfg ManagerConfig) *Manager {
 		repoCache:       newCache(cfg.RepositoryCacheConfig),
 		commitCache:     newCache(cfg.CommitCacheConfig),
 		maxBatchDelay:   cfg.MaxBatchDelay,
+		branchOwnership: branchOwnership,
 	}
 }
 
@@ -196,7 +241,7 @@ func (m *Manager) updateRepoState(ctx context.Context, repo *graveler.Repository
 }
 
 func (m *Manager) deleteRepositoryBranches(ctx context.Context, repository *graveler.RepositoryRecord) error {
-	itr, err := m.ListBranches(ctx, repository)
+	itr, err := m.ListBranches(ctx, repository, graveler.ListOptions{ShowHidden: true})
 	if err != nil {
 		return err
 	}
@@ -395,6 +440,23 @@ func (m *Manager) SetBranch(ctx context.Context, repository *graveler.Repository
 }
 
 func (m *Manager) BranchUpdate(ctx context.Context, repository *graveler.RepositoryRecord, branchID graveler.BranchID, f graveler.BranchUpdateFunc) error {
+	// TODO(ariels): Get request ID in a nicer way.
+	requestIDPtr := httputil.RequestIDFromContext(ctx)
+	// Grab ownership if configured.  Also check we actually have a
+	// request-ID on the request.  (lakeFS middleware should *always*
+	// place a request ID anyways.)
+	if m.branchOwnership != nil && requestIDPtr != nil {
+		requestID := *requestIDPtr
+		release, err := m.branchOwnership.Own(ctx, requestID, string(branchID))
+		if err != nil {
+			logging.FromContext(ctx).
+				WithFields(logging.Fields{}).
+				WithError(err).
+				Warn("Failed to get ownership on branch; continuing but may be slow")
+		} else {
+			defer release()
+		}
+	}
 	b, pred, err := m.getBranchWithPredicate(ctx, repository, branchID)
 	if err != nil {
 		return err
@@ -415,12 +477,12 @@ func (m *Manager) DeleteBranch(ctx context.Context, repository *graveler.Reposit
 	return m.kvStore.Delete(ctx, []byte(graveler.RepoPartition(repository)), []byte(graveler.BranchPath(branchID)))
 }
 
-func (m *Manager) ListBranches(ctx context.Context, repository *graveler.RepositoryRecord) (graveler.BranchIterator, error) {
-	return NewBranchSimpleIterator(ctx, m.kvStore, repository)
+func (m *Manager) ListBranches(ctx context.Context, repository *graveler.RepositoryRecord, opts graveler.ListOptions) (graveler.BranchIterator, error) {
+	return NewBranchSimpleIterator(ctx, m.kvStore, repository, opts)
 }
 
 func (m *Manager) GCBranchIterator(ctx context.Context, repository *graveler.RepositoryRecord) (graveler.BranchIterator, error) {
-	return NewBranchByCommitIterator(ctx, m.kvStore, repository)
+	return NewBranchByCommitIterator(ctx, m.kvStore, repository, graveler.ListOptions{ShowHidden: true})
 }
 
 func (m *Manager) GetTag(ctx context.Context, repository *graveler.RepositoryRecord, tagID graveler.TagID) (*graveler.CommitID, error) {
@@ -643,4 +705,111 @@ func (m *Manager) DeleteExpiredImports(ctx context.Context, repository *graveler
 		}
 	}
 	return errs.ErrorOrNil()
+}
+
+// Pull Requests logic
+// TODO (niro): In the future we would probably like to move all the PR logic into a dedicated service similar to actions.
+// TODO (niro): For now we put all the logic here under a single block
+
+const (
+	// pullRequestsPrefix used for repo context listing
+	pullRequestsPrefix = "pulls"
+	// PullsPartitionKey used for lookup per source-dest (future)
+	PullsPartitionKey = "pulls"
+	reposPrefix       = "repos"
+)
+
+func PullRequestPath(pullID graveler.PullRequestID) string {
+	return kv.FormatPath(pullRequestsPrefix, pullID.String())
+}
+
+func basePullsPath(repoID string) string {
+	return kv.FormatPath(reposPrefix, repoID)
+}
+
+func PullBySrcDstPath(repository *graveler.RepositoryRecord, srcBranch, dstBranch string) string {
+	return kv.FormatPath(basePullsPath(graveler.RepoPartition(repository)), srcBranch, dstBranch)
+}
+
+func (m *Manager) getPullWithPredicate(ctx context.Context, repository *graveler.RepositoryRecord, pullID graveler.PullRequestID) (*graveler.PullRequest, kv.Predicate, error) {
+	type pullWithPred struct {
+		*graveler.PullRequestRecord
+		kv.Predicate
+	}
+	key := fmt.Sprintf("GetPullRequest:%s:%s", repository.RepositoryID, pullID)
+	result, err := m.batchExecutor.BatchFor(ctx, key, m.maxBatchDelay, batch.ExecuterFunc(func() (interface{}, error) {
+		pullKey := PullRequestPath(pullID)
+		data := graveler.PullRequestData{}
+		pred, err := kv.GetMsg(context.Background(), m.kvStore, graveler.RepoPartition(repository), []byte(pullKey), &data)
+		if err != nil {
+			return nil, err
+		}
+		return &pullWithPred{graveler.PullRequestFromProto(&data), pred}, nil
+	}))
+	if errors.Is(err, kv.ErrNotFound) {
+		err = graveler.ErrPullRequestNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	p := result.(*pullWithPred)
+	return &p.PullRequest, p.Predicate, nil
+}
+
+func (m *Manager) GetPullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullID graveler.PullRequestID) (*graveler.PullRequest, error) {
+	pull, _, err := m.getPullWithPredicate(ctx, repository, pullID)
+	return pull, err
+}
+
+func (m *Manager) ListPullRequests(ctx context.Context, repository *graveler.RepositoryRecord) (graveler.PullsIterator, error) {
+	return NewPullsIterator(ctx, m.kvStore, repository)
+}
+
+func (m *Manager) CreatePullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequestID graveler.PullRequestID, pullRequest *graveler.PullRequest) error {
+	// Save secondary index by source - dest. For now, we override the value. In the future we should allow only single src-dest to exist
+	secondaryKey := []byte(PullBySrcDstPath(repository, pullRequest.Source, pullRequest.Destination))
+	err := kv.SetMsg(ctx, m.kvStore, PullsPartitionKey, secondaryKey, &kv.SecondaryIndex{PrimaryKey: []byte(pullRequestID.String())})
+	if err != nil {
+		return fmt.Errorf("save secondary index by src-dest (key %s): %w", secondaryKey, err)
+	}
+
+	// Save primary
+	err = kv.SetMsgIf(ctx, m.kvStore, graveler.RepoPartition(repository), []byte(PullRequestPath(pullRequestID)), graveler.ProtoFromPullRequest(pullRequestID, pullRequest), nil)
+	if errors.Is(err, kv.ErrPredicateFailed) {
+		err = graveler.ErrPullRequestExists
+	}
+	return err
+}
+
+func (m *Manager) DeletePullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequestID graveler.PullRequestID) error {
+	pr, _, err := m.getPullWithPredicate(ctx, repository, pullRequestID)
+	if err != nil {
+		if errors.Is(err, graveler.ErrPullRequestNotFound) { // Ignore if not exists
+			return nil
+		}
+		return err
+	}
+
+	// Delete secondary key
+	secondaryKey := []byte(PullBySrcDstPath(repository, pr.Source, pr.Destination))
+	if err = m.kvStore.Delete(ctx, []byte(PullsPartitionKey), secondaryKey); err != nil {
+		return fmt.Errorf("delete secondary index by src-dest (key %s): %w", secondaryKey, err)
+	}
+
+	// Delete primary key
+	pullKey := PullRequestPath(pullRequestID)
+	return m.kvStore.Delete(ctx, []byte(graveler.RepoPartition(repository)), []byte(pullKey))
+}
+
+func (m *Manager) UpdatePullRequest(ctx context.Context, repository *graveler.RepositoryRecord, pullRequestID graveler.PullRequestID, f graveler.PullUpdateFunc) error {
+	b, pred, err := m.getPullWithPredicate(ctx, repository, pullRequestID)
+	if err != nil {
+		return err
+	}
+	newPull, err := f(b)
+	// return on error or nothing to update
+	if err != nil || newPull == nil {
+		return err
+	}
+	return kv.SetMsgIf(ctx, m.kvStore, graveler.RepoPartition(repository), []byte(PullRequestPath(pullRequestID)), graveler.ProtoFromPullRequest(pullRequestID, newPull), pred)
 }

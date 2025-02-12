@@ -15,6 +15,8 @@ If you are interested in copying data into lakeFS, see [Copying data to/from lak
 
 {% include toc_2-3.html %}
 
+<iframe width="420" height="315" src="https://www.youtube.com/embed/R6K8tvtFCxQ"></iframe>
+
 ## Prerequisites
 
 * Importing is permitted for users in the Supers (open-source) group or the SuperUsers (Cloud/Enterprise) group.
@@ -89,7 +91,7 @@ lakeFS Enterprise
 {: .label .label-purple }
 
 With RBAC support, The lakeFS user running the import command should have the following permissions in lakeFS:
-`fs:WriteObject`, `fs:CreateMetaRange`, `fs:CreateCommit`, `fs:ImportFromStorage` and `fs:ImportCancel`.
+`fs:WriteObject`, `fs:CreateCommit`, `fs:ImportFromStorage` and `fs:ImportCancel`.
 
 As mentioned above, all of these permissions are available by default to the Supers (open-source) group or the SuperUsers (Cloud/Enterprise).
 

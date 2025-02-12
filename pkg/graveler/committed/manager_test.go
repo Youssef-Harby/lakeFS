@@ -56,12 +56,12 @@ func TestManager_WriteRange(t *testing.T) {
 			rangeWriter := mock.NewMockRangeWriter(ctrl)
 
 			rangeWriter.EXPECT().Abort().Return(nil)
-			rangeManager.EXPECT().GetWriter(context.Background(), committed.Namespace(ns), nil).Return(rangeWriter, nil)
+			rangeManager.EXPECT().GetWriter(context.Background(), committed.StorageID(""), committed.Namespace(ns), nil).Return(rangeWriter, nil)
 
 			sut := committed.NewCommittedManager(metarangeManager, rangeManager, params)
 
 			times := 0
-			expectedTimes := _min(len(tt.records), maxRecords)
+			expectedTimes := min(len(tt.records), maxRecords)
 			rangeWriter.EXPECT().WriteRecord(gomock.Any()).Return(nil).Times(expectedTimes)
 			rangeWriter.EXPECT().ShouldBreakAtKey(gomock.Any(), gomock.Any()).
 				DoAndReturn(func(interface{}, interface{}) bool { times++; return times == maxRecords }).Times(expectedTimes)
@@ -69,7 +69,7 @@ func TestManager_WriteRange(t *testing.T) {
 			rangeWriter.EXPECT().SetMetadata(committed.MetadataTypeKey, committed.MetadataRangesType)
 
 			it := testutils.NewFakeValueIterator(tt.records)
-			rangeInfo, err := sut.WriteRange(context.Background(), ns, it)
+			rangeInfo, err := sut.WriteRange(context.Background(), "", ns, it)
 			require.NoError(t, err)
 			require.Equal(t, &graveler.RangeInfo{
 				ID:                      graveler.RangeID(writeResult.RangeID),
@@ -82,18 +82,10 @@ func TestManager_WriteRange(t *testing.T) {
 	}
 }
 
-// _min - helper function to return the minimum of two integers
-// TODO(barak): replace with builtin min function after upgrade to go 1.21
-func _min(a int, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func TestManager_WriteMetaRange(t *testing.T) {
 	const (
-		ns = "some-ns"
+		storageID = ""
+		ns        = "some-ns"
 	)
 
 	expectedMetarangeID := graveler.MetaRangeID("some-id")
@@ -126,7 +118,7 @@ func TestManager_WriteMetaRange(t *testing.T) {
 			metarangeWriter := mock.NewMockMetaRangeWriter(ctrl)
 
 			minKey := ""
-			metarangeManager.EXPECT().NewWriter(context.Background(), graveler.StorageNamespace(ns), nil).Return(metarangeWriter)
+			metarangeManager.EXPECT().NewWriter(context.Background(), graveler.StorageID(storageID), graveler.StorageNamespace(ns), nil).Return(metarangeWriter)
 			metarangeWriter.EXPECT().WriteRange(gomock.Any()).Return(nil).
 				DoAndReturn(func(info committed.Range) error {
 					if string(info.MinKey) < minKey {
@@ -139,7 +131,7 @@ func TestManager_WriteMetaRange(t *testing.T) {
 			metarangeWriter.EXPECT().Abort().Return(nil)
 			sut := committed.NewCommittedManager(metarangeManager, rangeManager, params)
 
-			actualMetarangeID, err := sut.WriteMetaRange(context.Background(), ns, tt.records)
+			actualMetarangeID, err := sut.WriteMetaRange(context.Background(), storageID, ns, tt.records)
 			require.NoError(t, err)
 			require.Equal(t, &graveler.MetaRangeInfo{ID: expectedMetarangeID}, actualMetarangeID)
 		})

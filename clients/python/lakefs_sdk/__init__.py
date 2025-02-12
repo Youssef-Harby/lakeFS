@@ -30,6 +30,7 @@ from lakefs_sdk.api.import_api import ImportApi
 from lakefs_sdk.api.internal_api import InternalApi
 from lakefs_sdk.api.metadata_api import MetadataApi
 from lakefs_sdk.api.objects_api import ObjectsApi
+from lakefs_sdk.api.pulls_api import PullsApi
 from lakefs_sdk.api.refs_api import RefsApi
 from lakefs_sdk.api.repositories_api import RepositoriesApi
 from lakefs_sdk.api.staging_api import StagingApi
@@ -61,6 +62,7 @@ from lakefs_sdk.models.comm_prefs_input import CommPrefsInput
 from lakefs_sdk.models.commit import Commit
 from lakefs_sdk.models.commit_creation import CommitCreation
 from lakefs_sdk.models.commit_list import CommitList
+from lakefs_sdk.models.commit_overrides import CommitOverrides
 from lakefs_sdk.models.commit_record_creation import CommitRecordCreation
 from lakefs_sdk.models.complete_presign_multipart_upload import CompletePresignMultipartUpload
 from lakefs_sdk.models.config import Config
@@ -111,6 +113,11 @@ from lakefs_sdk.models.policy_list import PolicyList
 from lakefs_sdk.models.prepare_gc_uncommitted_request import PrepareGCUncommittedRequest
 from lakefs_sdk.models.prepare_gc_uncommitted_response import PrepareGCUncommittedResponse
 from lakefs_sdk.models.presign_multipart_upload import PresignMultipartUpload
+from lakefs_sdk.models.pull_request import PullRequest
+from lakefs_sdk.models.pull_request_basic import PullRequestBasic
+from lakefs_sdk.models.pull_request_creation import PullRequestCreation
+from lakefs_sdk.models.pull_request_creation_response import PullRequestCreationResponse
+from lakefs_sdk.models.pull_requests_list import PullRequestsList
 from lakefs_sdk.models.range_metadata import RangeMetadata
 from lakefs_sdk.models.ref import Ref
 from lakefs_sdk.models.ref_list import RefList
@@ -138,6 +145,7 @@ from lakefs_sdk.models.sts_auth_request import StsAuthRequest
 from lakefs_sdk.models.tag_creation import TagCreation
 from lakefs_sdk.models.task_info import TaskInfo
 from lakefs_sdk.models.underlying_object_properties import UnderlyingObjectProperties
+from lakefs_sdk.models.update_object_user_metadata import UpdateObjectUserMetadata
 from lakefs_sdk.models.update_token import UpdateToken
 from lakefs_sdk.models.upload_part import UploadPart
 from lakefs_sdk.models.usage_report import UsageReport

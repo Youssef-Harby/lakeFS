@@ -21,12 +21,14 @@ import (
 	"github.com/treeverse/lakefs/pkg/api/apiutil"
 	lakefsconfig "github.com/treeverse/lakefs/pkg/config"
 	"github.com/treeverse/lakefs/pkg/git"
+	giterror "github.com/treeverse/lakefs/pkg/git/errors"
 	"github.com/treeverse/lakefs/pkg/local"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/osinfo"
 	"github.com/treeverse/lakefs/pkg/uri"
 	"github.com/treeverse/lakefs/pkg/version"
 	"golang.org/x/exp/slices"
+	"golang.org/x/term"
 )
 
 const (
@@ -67,10 +69,18 @@ type Configuration struct {
 		AccessKeyID     lakefsconfig.OnlyString `mapstructure:"access_key_id"`
 		SecretAccessKey lakefsconfig.OnlyString `mapstructure:"secret_access_key"`
 	} `mapstructure:"credentials"`
+	Network struct {
+		HTTP2 struct {
+			Enabled bool `mapstructure:"enabled"`
+		} `mapstructure:"http2"`
+	} `mapstructure:"network"`
 	Server struct {
 		EndpointURL lakefsconfig.OnlyString `mapstructure:"endpoint_url"`
 		Retries     RetriesCfg              `mapstructure:"retries"`
 	} `mapstructure:"server"`
+	Options struct {
+		Parallelism int `mapstructure:"parallelism"`
+	} `mapstructure:"options"`
 	Metastore struct {
 		Type lakefsconfig.OnlyString `mapstructure:"type"`
 		Hive struct {
@@ -94,6 +104,20 @@ type Configuration struct {
 		// setting FixSparkPlaceholder to true will change spark placeholder with the actual location. for more information see https://github.com/treeverse/lakeFS/issues/2213
 		FixSparkPlaceholder bool `mapstructure:"fix_spark_placeholder"`
 	}
+	Local struct {
+		// SkipNonRegularFiles - By default lakectl local fails if local directory contains a symbolic link. When set, lakectl will ignore the symbolic links instead.
+		SkipNonRegularFiles bool `mapstructure:"skip_non_regular_files"`
+	} `mapstructure:"local"`
+	// Experimental - Use caution when enabling experimental features. It should only be used after consulting with the lakeFS team!
+	Experimental struct {
+		Local struct {
+			POSIXPerm struct {
+				Enabled    bool `mapstructure:"enabled"`
+				IncludeUID bool `mapstructure:"include_uid"`
+				IncludeGID bool `mapstructure:"include_gid"`
+			} `mapstructure:"posix_permissions"`
+		} `mapstructure:"local"`
+	} `mapstructure:"experimental"`
 }
 
 type versionInfo struct {
@@ -132,13 +156,16 @@ var (
 )
 
 const (
-	recursiveFlagName   = "recursive"
-	recursiveFlagShort  = "r"
-	presignFlagName     = "pre-sign"
-	parallelismFlagName = "parallelism"
+	recursiveFlagName     = "recursive"
+	recursiveFlagShort    = "r"
+	storageIDFlagName     = "storage-id"
+	presignFlagName       = "pre-sign"
+	parallelismFlagName   = "parallelism"
+	noProgressBarFlagName = "no-progress"
 
-	defaultSyncParallelism = 25
-	defaultSyncPresign     = true
+	defaultParallelism = 25
+	defaultSyncPresign = true
+	defaultNoProgress  = false
 
 	myRepoExample   = "lakefs://my-repo"
 	myBucketExample = "s3://my-bucket"
@@ -151,6 +178,7 @@ const (
 	fmtErrEmptyMsg        = `commit with no message without specifying the "--allow-empty-message" flag`
 	metaFlagName          = "meta"
 
+	defaultHTTP2Enabled     = true
 	defaultMaxAttempts      = 4
 	defaultMaxRetryInterval = 30 * time.Second
 	defaultMinRetryInterval = 200 * time.Millisecond
@@ -160,8 +188,15 @@ func withRecursiveFlag(cmd *cobra.Command, usage string) {
 	cmd.Flags().BoolP(recursiveFlagName, recursiveFlagShort, false, usage)
 }
 
+func withStorageID(cmd *cobra.Command) {
+	cmd.Flags().String(storageIDFlagName, "", "")
+	if err := cmd.Flags().MarkHidden(storageIDFlagName); err != nil {
+		DieErr(err)
+	}
+}
+
 func withParallelismFlag(cmd *cobra.Command) {
-	cmd.Flags().IntP(parallelismFlagName, "p", defaultSyncParallelism,
+	cmd.Flags().IntP(parallelismFlagName, "p", defaultParallelism,
 		"Max concurrent operations to perform")
 }
 
@@ -170,9 +205,15 @@ func withPresignFlag(cmd *cobra.Command) {
 		"Use pre-signed URLs when downloading/uploading data (recommended)")
 }
 
+func withNoProgress(cmd *cobra.Command) {
+	cmd.Flags().Bool(noProgressBarFlagName, defaultNoProgress,
+		"Disable progress bar animation for IO operations")
+}
+
 func withSyncFlags(cmd *cobra.Command) {
 	withParallelismFlag(cmd)
 	withPresignFlag(cmd)
+	withNoProgress(cmd)
 }
 
 type PresignMode struct {
@@ -209,10 +250,22 @@ func getPresignMode(cmd *cobra.Command, client *apigen.ClientWithResponses) Pres
 	return presignMode
 }
 
+func getNoProgressMode(cmd *cobra.Command) bool {
+	// Disable progress bar if stdout is not tty
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return true
+	}
+	return Must(cmd.Flags().GetBool(noProgressBarFlagName))
+}
+
 func getSyncFlags(cmd *cobra.Command, client *apigen.ClientWithResponses) local.SyncFlags {
 	parallelism := Must(cmd.Flags().GetInt(parallelismFlagName))
 	if parallelism < 1 {
 		DieFmt("Invalid value for parallelism (%d), minimum is 1.\n", parallelism)
+	}
+	changed := cmd.Flags().Changed(parallelismFlagName)
+	if viper.IsSet("options.parallelism") && !changed {
+		parallelism = cfg.Options.Parallelism
 	}
 
 	presignMode := getPresignMode(cmd, client)
@@ -220,6 +273,7 @@ func getSyncFlags(cmd *cobra.Command, client *apigen.ClientWithResponses) local.
 		Parallelism:      parallelism,
 		Presign:          presignMode.Enabled,
 		PresignMultipart: presignMode.Multipart,
+		NoProgress:       getNoProgressMode(cmd),
 	}
 }
 
@@ -243,7 +297,7 @@ func getSyncArgs(args []string, requireRemote bool, considerGitRoot bool) (remot
 		gitRoot, err := git.GetRepositoryPath(localPath)
 		if err == nil {
 			localPath = gitRoot
-		} else if !(errors.Is(err, git.ErrNotARepository) || errors.Is(err, git.ErrNoGit)) { // allow support in environments with no git
+		} else if !(errors.Is(err, giterror.ErrNotARepository) || errors.Is(err, giterror.ErrNoGit)) { // allow support in environments with no git
 			DieErr(err)
 		}
 	}
@@ -302,56 +356,8 @@ var rootCmd = &cobra.Command{
 	Short: "A cli tool to explore manage and work with lakeFS",
 	Long:  `lakectl is a CLI tool allowing exploration and manipulation of a lakeFS environment`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		logging.SetLevel(logLevel)
-		logging.SetOutputFormat(logFormat)
-		err := logging.SetOutputs(logOutputs, 0, 0)
-		if err != nil {
-			DieFmt("Failed to setup logging: %s", err)
-		}
-		if noColorRequested {
-			DisableColors()
-		}
-		if cmd == configCmd {
-			return
-		}
-
-		if cfgErr == nil {
-			logging.ContextUnavailable().
-				WithField("file", viper.ConfigFileUsed()).
-				Debug("loaded configuration from file")
-		} else if errors.As(cfgErr, &viper.ConfigFileNotFoundError{}) {
-			if cfgFile != "" {
-				// specific message in case the file isn't found
-				DieFmt("config file not found, please run \"lakectl config\" to create one\n%s\n", cfgErr)
-			}
-			// if the config file wasn't provided, try to run using the default values + env vars
-		} else if cfgErr != nil {
-			// other errors while reading the config file
-			DieFmt("error reading configuration file: %v", cfgErr)
-		}
-
-		err = viper.UnmarshalExact(&cfg, viper.DecodeHook(
-			mapstructure.ComposeDecodeHookFunc(
-				lakefsconfig.DecodeOnlyString,
-				mapstructure.StringToTimeDurationHookFunc())))
-		if err != nil {
-			DieFmt("error unmarshal configuration: %v", err)
-		}
-
-		if cmd.HasParent() {
-			// Don't send statistics for root command or if one of the excluding
-			var cmdName string
-			for curr := cmd; curr.HasParent(); curr = curr.Parent() {
-				if cmdName != "" {
-					cmdName = curr.Name() + "_" + cmdName
-				} else {
-					cmdName = curr.Name()
-				}
-			}
-			if !slices.Contains(excludeStatsCmds, cmdName) {
-				sendStats(cmd.Context(), getClient(), cmdName)
-			}
-		}
+		preRunCmd(cmd)
+		sendStats(cmd, "")
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		if !Must(cmd.Flags().GetBool("version")) {
@@ -409,47 +415,92 @@ var excludeStatsCmds = []string{
 	"config",
 }
 
-func sendStats(ctx context.Context, client apigen.ClientWithResponsesInterface, cmd string) {
-	if version.IsVersionUnreleased() {
+func preRunCmd(cmd *cobra.Command) {
+	logging.SetLevel(logLevel)
+	logging.SetOutputFormat(logFormat)
+	err := logging.SetOutputs(logOutputs, 0, 0)
+	if err != nil {
+		DieFmt("Failed to setup logging: %s", err)
+	}
+	if noColorRequested {
+		DisableColors()
+	}
+	if cmd == configCmd {
 		return
 	}
 
-	resp, err := client.PostStatsEventsWithResponse(ctx, apigen.PostStatsEventsJSONRequestBody{
-		Events: []apigen.StatsEvent{
-			{
-				Class: "lakectl",
-				Name:  cmd,
-				Count: 1,
-			},
-		},
-	})
-
-	var errStr string
-	if err != nil {
-		errStr = err.Error()
-	} else if resp.StatusCode() != http.StatusNoContent {
-		errStr = resp.Status()
+	if cfgFile != "" && cfgErr != nil {
+		DieFmt("error reading configuration file: %v", cfgErr)
 	}
-	if errStr != "" {
-		_, _ = fmt.Fprintf(os.Stderr, "Warning: failed sending statistics: %s\n", errStr)
+
+	logging.ContextUnavailable().
+		WithField("file", viper.ConfigFileUsed()).
+		Debug("loaded configuration from file")
+	err = viper.UnmarshalExact(&cfg, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
+		lakefsconfig.DecodeOnlyString,
+		mapstructure.StringToTimeDurationHookFunc())))
+	if err != nil {
+		DieFmt("error unmarshal configuration: %v", err)
 	}
 }
 
-func getClient() *apigen.ClientWithResponses {
+func sendStats(cmd *cobra.Command, cmdSuffix string) {
+	if version.IsVersionUnreleased() || !cmd.HasParent() { // Don't send statistics for root command
+		return
+	}
+	var cmdName string
+	for curr := cmd; curr.HasParent(); curr = curr.Parent() {
+		if cmdName != "" {
+			cmdName = curr.Name() + "_" + cmdName
+		} else {
+			cmdName = curr.Name()
+		}
+	}
+	if cmdSuffix != "" {
+		cmdName = cmdName + "_" + cmdSuffix
+	}
+	if !slices.Contains(excludeStatsCmds, cmdName) { // Skip excluded commands
+		resp, err := getClient().PostStatsEventsWithResponse(cmd.Context(), apigen.PostStatsEventsJSONRequestBody{
+			Events: []apigen.StatsEvent{
+				{
+					Class: "lakectl",
+					Name:  cmdName,
+					Count: 1,
+				},
+			},
+		})
+
+		var errStr string
+		if err != nil {
+			errStr = err.Error()
+		} else if resp.StatusCode() != http.StatusNoContent {
+			errStr = resp.Status()
+		}
+		if errStr != "" {
+			logging.ContextUnavailable().Debugf("Warning: failed sending statistics: %s\n", errStr)
+		}
+	}
+}
+
+func getHTTPClient() *http.Client {
 	// Override MaxIdleConnsPerHost to allow highly concurrent access to our API client.
 	// This is done to avoid accumulating many sockets in `TIME_WAIT` status that were closed
 	// only to be immediately reopened.
 	// see: https://stackoverflow.com/a/39834253
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConnsPerHost = DefaultMaxIdleConnsPerHost
-	var httpClient *http.Client
-	if !cfg.Server.Retries.Enabled {
-		httpClient = &http.Client{
-			Transport: transport,
-		}
-	} else {
-		httpClient = NewRetryClient(cfg.Server.Retries, transport)
+	if !cfg.Network.HTTP2.Enabled {
+		transport.ForceAttemptHTTP2 = false
+		transport.TLSClientConfig.NextProtos = []string{}
 	}
+	transport.MaxIdleConnsPerHost = DefaultMaxIdleConnsPerHost
+	if !cfg.Server.Retries.Enabled {
+		return &http.Client{Transport: transport}
+	}
+	return NewRetryClient(cfg.Server.Retries, transport)
+}
+
+func getClient() *apigen.ClientWithResponses {
+	httpClient := getHTTPClient()
 
 	accessKeyID := cfg.Credentials.AccessKeyID
 	secretAccessKey := cfg.Credentials.SecretAccessKey
@@ -534,8 +585,8 @@ func initConfig() {
 
 	// Inform viper of all expected fields.
 	// Otherwise, it fails to deserialize from the environment.
-	var cfg Configuration
-	keys := lakefsconfig.GetStructKeys(reflect.TypeOf(cfg), "mapstructure", "squash")
+	var conf Configuration
+	keys := lakefsconfig.GetStructKeys(reflect.TypeOf(conf), "mapstructure", "squash")
 	for _, key := range keys {
 		viper.SetDefault(key, nil)
 	}
@@ -545,11 +596,10 @@ func initConfig() {
 	viper.SetDefault("server.endpoint_url", "http://127.0.0.1:8000")
 	viper.SetDefault("server.retries.enabled", true)
 	viper.SetDefault("server.retries.max_attempts", defaultMaxAttempts)
+	viper.SetDefault("network.http2.enabled", defaultHTTP2Enabled)
 	viper.SetDefault("server.retries.max_wait_interval", defaultMaxRetryInterval)
 	viper.SetDefault("server.retries.min_wait_interval", defaultMinRetryInterval)
-
+	viper.SetDefault("experimental.local.posix_permissions.enabled", false)
+	viper.SetDefault("local.skip_non_regular_files", false)
 	cfgErr = viper.ReadInConfig()
-	if errors.Is(cfgErr, viper.ConfigFileNotFoundError{}) {
-		DieFmt("Failed to read config file '%s': %s", viper.ConfigFileUsed(), cfgErr)
-	}
 }

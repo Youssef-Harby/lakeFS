@@ -8,12 +8,12 @@ description: Mirroring allows replicating commits between lakeFS installations i
 {: .d-inline-block }
 lakeFS Cloud
 {: .label .label-green }
- {: .d-inline-block }
-Public Preview
-{: .label .label-green }
+
+lakeFS Enterprise
+{: .label .label-purple }
 
 {: .note}
-> Mirroring is only available for [lakeFS Cloud]({% link understand/lakefs-cloud.md %}).
+> Mirroring is only available for [lakeFS Cloud]({% link cloud/index.md %}).
 
 
 {% include toc.html %}
@@ -28,6 +28,7 @@ Unlike conventional mirroring, data isn't simply copied between regions - lakeFS
 
 ![mirroring architecture](../assets/img/mirroring/arch.png)
 
+<iframe width="420" height="315" src="https://www.youtube.com/embed/NhOWGVjQrrA"></iframe>
 
 ## Uses cases
 
@@ -75,7 +76,7 @@ In order to replicate the existing objects, we'd need to manually copy them - ho
 ### Creating a lakeFS user with a "replicator" policy
 
 On our source lakeFS installation, under **Administration** create a new user that will be used by the replication subsystem.
-The user should have the following [RBAC policy](../reference/security/rbac.html) attached:
+The user should have the following [RBAC policy](../security/rbac.html) attached:
 
 ```json
 {
@@ -94,7 +95,6 @@ The user should have the following [RBAC policy](../reference/security/rbac.html
             "fs:DeleteObject",
             "fs:ListObjects",
             "fs:CreateCommit",
-            "fs:CreateMetaRange",
             "fs:ReadCommit",
             "fs:ListCommits",
             "fs:CreateBranch",
@@ -148,7 +148,6 @@ The user should have the following [RBAC policy](../reference/security/rbac.html
             "fs:DeleteObject",
             "fs:ListObjects",
             "fs:CreateCommit",
-            "fs:CreateMetaRange",
             "fs:ReadCommit",
             "fs:ListCommits",
             "fs:CreateBranch",

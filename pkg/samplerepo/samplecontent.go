@@ -80,18 +80,22 @@ func PopulateSampleRepo(ctx context.Context, repo *catalog.Repository, cat *cata
 		}
 
 		// write file to storage
-		address := pathProvider.NewPath()
-		blob, err := upload.WriteBlob(ctx, blockAdapter, repo.StorageNamespace, address, contentReader, contentSize, block.PutOpts{})
+		objectPointer := block.ObjectPointer{
+			StorageID:        repo.StorageID,
+			StorageNamespace: repo.StorageNamespace,
+			IdentifierType:   block.IdentifierTypeRelative,
+			Identifier:       pathProvider.NewPath(),
+		}
+		blob, err := upload.WriteBlob(ctx, blockAdapter, objectPointer, contentReader, contentSize, block.PutOpts{})
 		if err != nil {
 			return err
 		}
 
 		// create metadata entry
-		writeTime := time.Now()
 		entry := catalog.NewDBEntryBuilder().
 			Path(strings.TrimPrefix(contentPath, sampleRepoFSRootPath+"/")).
 			PhysicalAddress(blob.PhysicalAddress).
-			CreationDate(writeTime).
+			CreationDate(blob.CreationDate).
 			Size(blob.Size).
 			Checksum(blob.Checksum).
 			AddressType(catalog.AddressTypeRelative).

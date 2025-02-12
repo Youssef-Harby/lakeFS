@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,11 +24,11 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-openapi/swag"
 	"github.com/gorilla/sessions"
+	authacl "github.com/treeverse/lakefs/contrib/auth/acl"
 	"github.com/treeverse/lakefs/pkg/actions"
 	"github.com/treeverse/lakefs/pkg/api/apigen"
 	"github.com/treeverse/lakefs/pkg/api/apiutil"
 	"github.com/treeverse/lakefs/pkg/auth"
-	"github.com/treeverse/lakefs/pkg/auth/acl"
 	"github.com/treeverse/lakefs/pkg/auth/model"
 	"github.com/treeverse/lakefs/pkg/auth/setup"
 	"github.com/treeverse/lakefs/pkg/authentication"
@@ -71,6 +72,12 @@ const (
 	httpStatusClientClosedRequest = 499
 	// httpStatusClientClosedRequestText text used for client closed request status code
 	httpStatusClientClosedRequestText = "Client closed request"
+
+	pullRequestClosed = "CLOSED"
+	pullRequestOpen   = "OPEN"
+
+	usernamePlaceholder = "Username"
+	passwordPlaceholder = "Password"
 )
 
 type actionsHandler interface {
@@ -85,7 +92,7 @@ type Migrator interface {
 }
 
 type Controller struct {
-	Config                *config.Config
+	Config                config.Config
 	Catalog               *catalog.Catalog
 	Authenticator         auth.Authenticator
 	Auth                  auth.Service
@@ -105,7 +112,7 @@ type Controller struct {
 
 var usageCounter = stats.NewUsageCounter()
 
-func NewController(cfg *config.Config, catalog *catalog.Catalog, authenticator auth.Authenticator, authService auth.Service, authenticationService authentication.Service, blockAdapter block.Adapter, metadataManager auth.MetadataManager, migrator Migrator, collector stats.Collector, cloudMetadataProvider cloud.MetadataProvider, actions actionsHandler, auditChecker AuditChecker, logger logging.Logger, sessionStore sessions.Store, pathProvider upload.PathProvider, usageReporter stats.UsageReporterOperations) *Controller {
+func NewController(cfg config.Config, catalog *catalog.Catalog, authenticator auth.Authenticator, authService auth.Service, authenticationService authentication.Service, blockAdapter block.Adapter, metadataManager auth.MetadataManager, migrator Migrator, collector stats.Collector, cloudMetadataProvider cloud.MetadataProvider, actions actionsHandler, auditChecker AuditChecker, logger logging.Logger, sessionStore sessions.Store, pathProvider upload.PathProvider, usageReporter stats.UsageReporterOperations) *Controller {
 	return &Controller{
 		Config:                cfg,
 		Catalog:               catalog,
@@ -161,15 +168,19 @@ func (c *Controller) CreatePresignMultipartUpload(w http.ResponseWriter, r *http
 	ctx := r.Context()
 	c.LogAction(ctx, "create_presign_multipart_upload", r, repository, branch, "")
 
-	// check if api is supported
-	storageConfig := c.getStorageConfig()
-	if !swag.BoolValue(storageConfig.PreSignMultipartUpload) {
-		writeError(w, r, http.StatusNotImplemented, "presign multipart upload API is not supported")
+	repo, err := c.Catalog.GetRepository(ctx, repository)
+	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
 
-	repo, err := c.Catalog.GetRepository(ctx, repository)
+	storageConfig, err := c.getStorageConfig(repo.StorageID)
 	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	// check if api is supported
+	if !swag.BoolValue(storageConfig.PreSignMultipartUpload) {
+		writeError(w, r, http.StatusNotImplemented, "presign multipart upload API is not supported")
 		return
 	}
 
@@ -192,7 +203,7 @@ func (c *Controller) CreatePresignMultipartUpload(w http.ResponseWriter, r *http
 
 	// check valid number of parts
 	if params.Parts != nil {
-		if *params.Parts < 0 || int32(*params.Parts) > manager.MaxUploadParts {
+		if *params.Parts < 0 || int32(*params.Parts) > manager.MaxUploadParts { //nolint:gosec
 			writeError(w, r, http.StatusBadRequest, fmt.Sprintf("parts can be between 0 and %d", manager.MaxUploadParts))
 			return
 		}
@@ -205,7 +216,7 @@ func (c *Controller) CreatePresignMultipartUpload(w http.ResponseWriter, r *http
 		return
 	}
 
-	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, address, block.IdentifierTypeRelative)
+	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, address, block.IdentifierTypeRelative)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
@@ -213,6 +224,7 @@ func (c *Controller) CreatePresignMultipartUpload(w http.ResponseWriter, r *http
 
 	// create a new multipart upload
 	mpuResp, err := c.BlockAdapter.CreateMultiPartUpload(ctx, block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       address,
@@ -226,6 +238,7 @@ func (c *Controller) CreatePresignMultipartUpload(w http.ResponseWriter, r *http
 	for i := 0; i < swag.IntValue(params.Parts); i++ {
 		// generate a pre-signed PUT url for the given request
 		preSignedURL, err := c.BlockAdapter.GetPresignUploadPartURL(ctx, block.ObjectPointer{
+			StorageID:        repo.StorageID,
 			StorageNamespace: repo.StorageNamespace,
 			Identifier:       address,
 			IdentifierType:   block.IdentifierTypeRelative,
@@ -259,8 +272,17 @@ func (c *Controller) AbortPresignMultipartUpload(w http.ResponseWriter, r *http.
 	ctx := r.Context()
 	c.LogAction(ctx, "abort_presign_multipart_upload", r, repository, branch, "")
 
+	repo, err := c.Catalog.GetRepository(ctx, repository)
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	storageConfig, err := c.getStorageConfig(repo.StorageID)
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
 	// check if api is supported
-	storageConfig := c.getStorageConfig()
 	if !swag.BoolValue(storageConfig.PreSignMultipartUpload) {
 		writeError(w, r, http.StatusNotImplemented, "presign multipart upload API is not supported")
 		return
@@ -280,11 +302,6 @@ func (c *Controller) AbortPresignMultipartUpload(w http.ResponseWriter, r *http.
 		return
 	}
 
-	repo, err := c.Catalog.GetRepository(ctx, repository)
-	if c.handleAPIError(ctx, w, r, err) {
-		return
-	}
-
 	// verify physical address
 	physicalAddress, addressType := normalizePhysicalAddress(repo.StorageNamespace, body.PhysicalAddress)
 	if addressType != catalog.AddressTypeRelative {
@@ -297,6 +314,7 @@ func (c *Controller) AbortPresignMultipartUpload(w http.ResponseWriter, r *http.
 	}
 
 	if err := c.BlockAdapter.AbortMultiPartUpload(ctx, block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       physicalAddress,
@@ -318,8 +336,17 @@ func (c *Controller) CompletePresignMultipartUpload(w http.ResponseWriter, r *ht
 	ctx := r.Context()
 	c.LogAction(ctx, "complete_presign_multipart_upload", r, repository, branch, "")
 
+	repo, err := c.Catalog.GetRepository(ctx, repository)
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	storageConfig, err := c.getStorageConfig(repo.StorageID)
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
 	// check if api is supported
-	storageConfig := c.getStorageConfig()
 	if !swag.BoolValue(storageConfig.PreSignMultipartUpload) {
 		writeError(w, r, http.StatusNotImplemented, "presign multipart upload API is not supported")
 		return
@@ -344,12 +371,6 @@ func (c *Controller) CompletePresignMultipartUpload(w http.ResponseWriter, r *ht
 	}
 
 	// verify physical address
-	repo, err := c.Catalog.GetRepository(ctx, repository)
-	if c.handleAPIError(ctx, w, r, err) {
-		return
-	}
-
-	writeTime := time.Now()
 	physicalAddress, addressType := normalizePhysicalAddress(repo.StorageNamespace, body.PhysicalAddress)
 	if addressType != catalog.AddressTypeRelative {
 		writeError(w, r, http.StatusBadRequest, "physical address must be relative to the storage namespace")
@@ -370,6 +391,7 @@ func (c *Controller) CompletePresignMultipartUpload(w http.ResponseWriter, r *ht
 	}
 
 	mpuResp, err := c.BlockAdapter.CompleteMultiPartUpload(ctx, block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       physicalAddress,
@@ -380,7 +402,14 @@ func (c *Controller) CompletePresignMultipartUpload(w http.ResponseWriter, r *ht
 		return
 	}
 
+	writeTime := time.Now()
 	checksum := httputil.StripQuotesAndSpaces(mpuResp.ETag)
+	// Anything else can be _really_ wrong when the storage layer assigns the time of MPU
+	// creation.  For instance, the S3 block adapter makes sure to return an MTime from
+	// headObject to ensure that we do have a time here.
+	if mpuResp.MTime != nil {
+		writeTime = *mpuResp.MTime
+	}
 	entryBuilder := catalog.NewDBEntryBuilder().
 		CommonLevel(false).
 		Path(params.Path).
@@ -556,7 +585,7 @@ func (c *Controller) Login(w http.ResponseWriter, r *http.Request, body apigen.L
 	}
 
 	loginTime := time.Now()
-	duration := c.Config.Auth.LoginDuration
+	duration := c.Config.GetBaseConfig().Auth.LoginDuration
 	expires := loginTime.Add(duration)
 	secret := c.Auth.SecretStore().SharedSecret()
 
@@ -600,13 +629,13 @@ func (c *Controller) ExternalPrincipalLogin(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	c.Logger.WithField("user_id", externalPrincipalIDInfo.UserID).Debug("got external principal ID info, generating a new JWT")
-	duration := c.Config.Auth.LoginDuration
+	duration := c.Config.GetBaseConfig().Auth.LoginDuration
 	if swag.IntValue(body.TokenExpirationDuration) > 0 {
 		duration = time.Second * time.Duration(*body.TokenExpirationDuration)
 	}
-	if duration > c.Config.Auth.LoginMaxDuration {
-		c.Logger.WithFields(logging.Fields{"duration": duration, "max_duration": c.Config.Auth.LoginMaxDuration}).Warn("Login duration exceeds maximum allowed, using maximum allowed")
-		duration = c.Config.Auth.LoginMaxDuration
+	if duration > c.Config.GetBaseConfig().Auth.LoginMaxDuration {
+		c.Logger.WithFields(logging.Fields{"duration": duration, "max_duration": c.Config.GetBaseConfig().Auth.LoginMaxDuration}).Warn("Login duration exceeds maximum allowed, using maximum allowed")
+		duration = c.Config.GetBaseConfig().Auth.LoginMaxDuration
 	}
 	loginTime := time.Now()
 	expires := loginTime.Add(duration)
@@ -680,7 +709,7 @@ func (c *Controller) GetPhysicalAddress(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, address, block.IdentifierTypeRelative)
+	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, address, block.IdentifierTypeRelative)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
@@ -693,6 +722,7 @@ func (c *Controller) GetPhysicalAddress(w http.ResponseWriter, r *http.Request, 
 	if swag.BoolValue(params.Presign) {
 		// generate a pre-signed PUT url for the given request
 		preSignedURL, expiry, err := c.BlockAdapter.GetPreSignedURL(ctx, block.ObjectPointer{
+			StorageID:        repo.StorageID,
 			StorageNamespace: repo.StorageNamespace,
 			Identifier:       address,
 			IdentifierType:   block.IdentifierTypeRelative,
@@ -733,7 +763,7 @@ func (c *Controller) LinkPhysicalAddress(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	// write metadata
-	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, params.Path, block.IdentifierTypeRelative)
+	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, params.Path, block.IdentifierTypeRelative)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
@@ -748,7 +778,12 @@ func (c *Controller) LinkPhysicalAddress(w http.ResponseWriter, r *http.Request,
 		ifAbsent = true
 	}
 
-	blockStoreType := c.BlockAdapter.BlockstoreType()
+	storage := c.Config.StorageConfig().GetStorageByID(repo.StorageID)
+	if storage == nil {
+		c.handleAPIError(ctx, w, r, fmt.Errorf("no storage config found for id: %s: %w", repo.StorageID, block.ErrInvalidAddress))
+		return
+	}
+	blockStoreType := storage.BlockstoreType()
 	expectedType := qk.GetStorageType().BlockstoreType()
 	if expectedType != blockStoreType {
 		c.Logger.WithContext(ctx).WithFields(logging.Fields{
@@ -760,6 +795,9 @@ func (c *Controller) LinkPhysicalAddress(w http.ResponseWriter, r *http.Request,
 	}
 
 	writeTime := time.Now()
+	if mtime := body.Mtime; mtime != nil {
+		writeTime = time.Unix(*mtime, 0)
+	}
 	fullPhysicalAddress := swag.StringValue(body.Staging.PhysicalAddress)
 	physicalAddress, addressType := normalizePhysicalAddress(repo.StorageNamespace, fullPhysicalAddress)
 
@@ -861,6 +899,7 @@ func (c *Controller) ListGroups(w http.ResponseWriter, r *http.Request, params a
 		response.Results = append(response.Results, apigen.Group{
 			Id:           g.ID,
 			Name:         swag.String(g.DisplayName),
+			Description:  g.Description,
 			CreationDate: g.CreatedAt.Unix(),
 		})
 	}
@@ -887,6 +926,7 @@ func (c *Controller) CreateGroup(w http.ResponseWriter, r *http.Request, body ap
 	}
 
 	g := &model.Group{
+		Description: body.Description,
 		CreatedAt:   time.Now().UTC(),
 		DisplayName: body.Id,
 	}
@@ -898,6 +938,7 @@ func (c *Controller) CreateGroup(w http.ResponseWriter, r *http.Request, body ap
 		CreationDate: createdGroup.CreatedAt.Unix(),
 		Name:         swag.String(createdGroup.DisplayName),
 		Id:           createdGroup.ID,
+		Description:  createdGroup.Description,
 	}
 	writeResponse(w, r, http.StatusCreated, response)
 }
@@ -947,13 +988,14 @@ func (c *Controller) GetGroup(w http.ResponseWriter, r *http.Request, groupID st
 
 	response := apigen.Group{
 		Id:           g.DisplayName,
+		Description:  g.Description,
 		CreationDate: g.CreatedAt.Unix(),
 	}
 	writeResponse(w, r, http.StatusOK, response)
 }
 
 func (c *Controller) GetGroupACL(w http.ResponseWriter, r *http.Request, groupID string) {
-	aclPolicyName := acl.PolicyName(groupID)
+	aclPolicyName := authacl.PolicyName(groupID)
 	if !c.authorize(w, r, permissions.Node{
 		Type: permissions.NodeTypeAnd,
 		Nodes: []permissions.Node{
@@ -1025,7 +1067,7 @@ func (c *Controller) GetGroupACL(w http.ResponseWriter, r *http.Request, groupID
 }
 
 func (c *Controller) SetGroupACL(w http.ResponseWriter, r *http.Request, body apigen.SetGroupACLJSONRequestBody, groupID string) {
-	aclPolicyName := acl.PolicyName(groupID)
+	aclPolicyName := authacl.PolicyName(groupID)
 	if !c.authorize(w, r, permissions.Node{
 		Type: permissions.NodeTypeAnd,
 		Nodes: []permissions.Node{
@@ -1059,7 +1101,7 @@ func (c *Controller) SetGroupACL(w http.ResponseWriter, r *http.Request, body ap
 		Permission: model.ACLPermission(body.Permission),
 	}
 
-	err := acl.WriteGroupACL(ctx, c.Auth, groupID, newACL, time.Now(), false)
+	err := authacl.WriteGroupACL(ctx, c.Auth, groupID, newACL, time.Now(), false)
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
@@ -1100,6 +1142,7 @@ func (c *Controller) ListGroupMembers(w http.ResponseWriter, r *http.Request, gr
 			Id:           u.Username,
 			Email:        u.Email,
 			CreationDate: u.CreatedAt.Unix(),
+			FriendlyName: u.FriendlyName,
 		})
 	}
 	writeResponse(w, r, http.StatusOK, response)
@@ -1143,7 +1186,7 @@ func (c *Controller) AddGroupMembership(w http.ResponseWriter, r *http.Request, 
 }
 
 func (c *Controller) ListGroupPolicies(w http.ResponseWriter, r *http.Request, groupID string, params apigen.ListGroupPoliciesParams) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1200,7 +1243,7 @@ func serializePolicy(p *model.Policy) apigen.Policy {
 }
 
 func (c *Controller) DetachPolicyFromGroup(w http.ResponseWriter, r *http.Request, groupID, policyID string) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1222,7 +1265,7 @@ func (c *Controller) DetachPolicyFromGroup(w http.ResponseWriter, r *http.Reques
 }
 
 func (c *Controller) AttachPolicyToGroup(w http.ResponseWriter, r *http.Request, groupID, policyID string) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1245,7 +1288,7 @@ func (c *Controller) AttachPolicyToGroup(w http.ResponseWriter, r *http.Request,
 }
 
 func (c *Controller) ListPolicies(w http.ResponseWriter, r *http.Request, params apigen.ListPoliciesParams) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1284,7 +1327,7 @@ func (c *Controller) ListPolicies(w http.ResponseWriter, r *http.Request, params
 }
 
 func (c *Controller) CreatePolicy(w http.ResponseWriter, r *http.Request, body apigen.CreatePolicyJSONRequestBody) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1330,7 +1373,7 @@ func (c *Controller) CreatePolicy(w http.ResponseWriter, r *http.Request, body a
 }
 
 func (c *Controller) DeletePolicy(w http.ResponseWriter, r *http.Request, policyID string) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1356,7 +1399,7 @@ func (c *Controller) DeletePolicy(w http.ResponseWriter, r *http.Request, policy
 }
 
 func (c *Controller) GetPolicy(w http.ResponseWriter, r *http.Request, policyID string) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1384,7 +1427,7 @@ func (c *Controller) GetPolicy(w http.ResponseWriter, r *http.Request, policyID 
 }
 
 func (c *Controller) UpdatePolicy(w http.ResponseWriter, r *http.Request, body apigen.UpdatePolicyJSONRequestBody, policyID string) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1711,7 +1754,7 @@ func (c *Controller) ListUserGroups(w http.ResponseWriter, r *http.Request, user
 }
 
 func (c *Controller) ListUserPolicies(w http.ResponseWriter, r *http.Request, userID string, params apigen.ListUserPoliciesParams) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1756,7 +1799,7 @@ func (c *Controller) ListUserPolicies(w http.ResponseWriter, r *http.Request, us
 }
 
 func (c *Controller) DetachPolicyFromUser(w http.ResponseWriter, r *http.Request, userID, policyID string) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1778,7 +1821,7 @@ func (c *Controller) DetachPolicyFromUser(w http.ResponseWriter, r *http.Request
 }
 
 func (c *Controller) AttachPolicyToUser(w http.ResponseWriter, r *http.Request, userID, policyID string) {
-	if c.Config.IsAuthUISimplified() {
+	if c.Config.GetBaseConfig().IsAuthUISimplified() {
 		writeError(w, r, http.StatusNotImplemented, "Not implemented")
 		return
 	}
@@ -1806,7 +1849,6 @@ func (c *Controller) GetConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, ErrAuthenticatingRequest)
 		return
 	}
-	var storageCfg apigen.StorageConfig
 	internalError := false
 	if !c.authorizeCallback(w, r, permissions.Node{
 		Permission: permissions.Permission{
@@ -1825,12 +1867,12 @@ func (c *Controller) GetConfig(w http.ResponseWriter, r *http.Request) {
 		if internalError {
 			return
 		}
-	} else {
-		storageCfg = c.getStorageConfig()
 	}
 
+	storageCfg, _ := c.getStorageConfig(config.SingleBlockstoreID)
+	storageListCfg := c.getStorageConfigList()
 	versionConfig := c.getVersionConfig()
-	writeResponse(w, r, http.StatusOK, apigen.Config{StorageConfig: &storageCfg, VersionConfig: &versionConfig})
+	writeResponse(w, r, http.StatusOK, apigen.Config{StorageConfig: storageCfg, VersionConfig: &versionConfig, StorageConfigList: &storageListCfg})
 }
 
 func (c *Controller) GetStorageConfig(w http.ResponseWriter, r *http.Request) {
@@ -1843,26 +1885,55 @@ func (c *Controller) GetStorageConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeResponse(w, r, http.StatusOK, c.getStorageConfig())
+	storageCfg, _ := c.getStorageConfig(config.SingleBlockstoreID)
+	writeResponse(w, r, http.StatusOK, storageCfg)
 }
 
-func (c *Controller) getStorageConfig() apigen.StorageConfig {
-	info := c.BlockAdapter.GetStorageNamespaceInfo()
-	defaultNamespacePrefix := swag.String(info.DefaultNamespacePrefix)
-	if c.Config.Blockstore.DefaultNamespacePrefix != nil {
-		defaultNamespacePrefix = c.Config.Blockstore.DefaultNamespacePrefix
+func (c *Controller) getStorageConfig(storageID string) (*apigen.StorageConfig, error) {
+	storage := c.Config.StorageConfig().GetStorageByID(storageID)
+	if storage == nil {
+		return nil, config.ErrNoStorageConfig
 	}
-	return apigen.StorageConfig{
-		BlockstoreType:                   c.Config.Blockstore.Type,
+	info := c.BlockAdapter.GetStorageNamespaceInfo(storageID)
+	if info == nil {
+		c.Logger.Error("no storage namespace info found for id: %s", storageID)
+		return nil, config.ErrNoStorageConfig
+	}
+
+	defaultNamespacePrefix := storage.GetDefaultNamespacePrefix()
+	if defaultNamespacePrefix != nil {
+		info.DefaultNamespacePrefix = *defaultNamespacePrefix
+	}
+	return &apigen.StorageConfig{
+		BlockstoreDescription: swag.String(storage.BlockstoreDescription()),
+		BlockstoreExtras: &apigen.StorageConfig_BlockstoreExtras{
+			AdditionalProperties: storage.BlockstoreExtras(),
+		},
+		BackwardCompatible:               swag.Bool(storage.IsBackwardsCompatible()),
+		BlockstoreType:                   storage.BlockstoreType(),
 		BlockstoreNamespaceValidityRegex: info.ValidityRegex,
 		BlockstoreNamespaceExample:       info.Example,
-		DefaultNamespacePrefix:           defaultNamespacePrefix,
+		DefaultNamespacePrefix:           swag.String(info.DefaultNamespacePrefix),
 		PreSignSupport:                   info.PreSignSupport,
 		PreSignSupportUi:                 info.PreSignSupportUI,
 		ImportSupport:                    info.ImportSupport,
 		ImportValidityRegex:              info.ImportValidityRegex,
 		PreSignMultipartUpload:           swag.Bool(info.PreSignSupportMultipart),
+	}, nil
+}
+
+func (c *Controller) getStorageConfigList() apigen.StorageConfigList {
+	configList := apigen.StorageConfigList{}
+	for _, id := range c.Config.StorageConfig().GetStorageIDs() {
+		info, err := c.getStorageConfig(id)
+		if info == nil {
+			c.Logger.WithError(err).Error("no storage config found for id: %s", id)
+			continue
+		}
+		info.BlockstoreId = swag.String(id)
+		configList = append(configList, *info)
 	}
+	return configList
 }
 
 func (c *Controller) HealthCheck(w http.ResponseWriter, r *http.Request) {
@@ -1881,7 +1952,7 @@ func (c *Controller) ListRepositories(w http.ResponseWriter, r *http.Request, pa
 	ctx := r.Context()
 	c.LogAction(ctx, "list_repos", r, "", "", "")
 
-	repos, hasMore, err := c.Catalog.ListRepositories(ctx, paginationAmount(params.Amount), paginationPrefix(params.Prefix), paginationAfter(params.After))
+	repos, hasMore, err := c.Catalog.ListRepositories(ctx, paginationAmount(params.Amount), paginationPrefix(params.Prefix), search(params.Search), paginationAfter(params.After))
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
@@ -1890,6 +1961,7 @@ func (c *Controller) ListRepositories(w http.ResponseWriter, r *http.Request, pa
 		creationDate := repo.CreationDate.Unix()
 		r := apigen.Repository{
 			Id:               repo.Name,
+			StorageId:        swag.String(repo.StorageID),
 			StorageNamespace: repo.StorageNamespace,
 			CreationDate:     creationDate,
 			DefaultBranch:    repo.DefaultBranch,
@@ -1905,6 +1977,9 @@ func (c *Controller) ListRepositories(w http.ResponseWriter, r *http.Request, pa
 }
 
 func (c *Controller) CreateRepository(w http.ResponseWriter, r *http.Request, body apigen.CreateRepositoryJSONRequestBody, params apigen.CreateRepositoryParams) {
+	storageID := swag.StringValue(body.StorageId)
+	storageNamespace := body.StorageNamespace
+
 	if !c.authorize(w, r, permissions.Node{
 		Type: permissions.NodeTypeAnd,
 		Nodes: []permissions.Node{
@@ -1917,7 +1992,7 @@ func (c *Controller) CreateRepository(w http.ResponseWriter, r *http.Request, bo
 			{
 				Permission: permissions.Permission{
 					Action:   permissions.AttachStorageNamespaceAction,
-					Resource: permissions.StorageNamespace(body.StorageNamespace),
+					Resource: permissions.StorageNamespace(storageNamespace),
 				},
 			},
 		},
@@ -1935,15 +2010,29 @@ func (c *Controller) CreateRepository(w http.ResponseWriter, r *http.Request, bo
 		c.handleAPIError(ctx, w, r, fmt.Errorf("error creating repository: %w", graveler.ErrNotUnique))
 		return
 	}
+
 	sampleData := swag.BoolValue(body.SampleData)
 	c.LogAction(ctx, "create_repo", r, body.Name, "", "")
 	if sampleData {
 		c.LogAction(ctx, "repo_sample_data", r, body.Name, "", "")
 	}
 
-	if err := c.validateStorageNamespace(body.StorageNamespace); err != nil {
+	// Validate storage ID exists
+	if !slices.Contains(c.Config.StorageConfig().GetStorageIDs(), storageID) {
+		c.handleAPIError(ctx, w, r, graveler.ErrInvalidStorageID)
+		return
+	}
+
+	if err := c.validateStorageNamespace(storageID, storageNamespace); err != nil {
 		writeError(w, r, http.StatusBadRequest, err)
 		return
+	}
+
+	if !c.Config.GetBaseConfig().Installation.AllowInterRegionStorage {
+		if err := block.ValidateInterRegionStorage(r.Context(), c.BlockAdapter, storageID, storageNamespace); err != nil {
+			writeError(w, r, http.StatusBadRequest, err)
+			return
+		}
 	}
 
 	defaultBranch := swag.StringValue(body.DefaultBranch)
@@ -1951,25 +2040,8 @@ func (c *Controller) CreateRepository(w http.ResponseWriter, r *http.Request, bo
 		defaultBranch = "main"
 	}
 
-	if swag.BoolValue(params.Bare) {
-		// create a bare repository. This is useful in conjunction with refs-restore to create a copy
-		// of another repository by e.g. copying the _lakefs/ directory and restoring its refs
-		repo, err := c.Catalog.CreateBareRepository(ctx, body.Name, body.StorageNamespace, defaultBranch, swag.BoolValue(body.ReadOnly))
-		if c.handleAPIError(ctx, w, r, err) {
-			return
-		}
-		response := apigen.Repository{
-			CreationDate:     repo.CreationDate.Unix(),
-			DefaultBranch:    repo.DefaultBranch,
-			Id:               repo.Name,
-			StorageNamespace: repo.StorageNamespace,
-		}
-		writeResponse(w, r, http.StatusCreated, response)
-		return
-	}
-
 	if !swag.BoolValue(body.ReadOnly) {
-		if err := c.ensureStorageNamespace(ctx, body.StorageNamespace); err != nil {
+		if err := c.ensureStorageNamespace(ctx, storageID, storageNamespace); err != nil {
 			var (
 				reason string
 				retErr error
@@ -1980,7 +2052,7 @@ func (c *Controller) CreateRepository(w http.ResponseWriter, r *http.Request, bo
 				retErr = err
 				reason = "bad_url"
 			case errors.Is(err, block.ErrInvalidAddress):
-				retErr = fmt.Errorf("%w, must match: %s", err, c.BlockAdapter.BlockstoreType())
+				retErr = fmt.Errorf("%w, must match: %s", err, c.Config.StorageConfig().GetStorageByID(storageID).BlockstoreType())
 				reason = "invalid_namespace"
 			case errors.Is(err, ErrStorageNamespaceInUse):
 				retErr = err
@@ -1991,7 +2063,7 @@ func (c *Controller) CreateRepository(w http.ResponseWriter, r *http.Request, bo
 			}
 			c.Logger.
 				WithError(err).
-				WithField("storage_namespace", body.StorageNamespace).
+				WithField("storage_namespace", storageNamespace).
 				WithField("reason", reason).
 				Warn("Could not access storage namespace")
 			writeError(w, r, http.StatusBadRequest, fmt.Errorf("failed to create repository: %w", retErr))
@@ -1999,7 +2071,25 @@ func (c *Controller) CreateRepository(w http.ResponseWriter, r *http.Request, bo
 		}
 	}
 
-	newRepo, err := c.Catalog.CreateRepository(ctx, body.Name, body.StorageNamespace, defaultBranch, swag.BoolValue(body.ReadOnly))
+	if swag.BoolValue(params.Bare) {
+		// create a bare repository. This is useful in conjunction with refs-restore to create a copy
+		// of another repository by e.g. copying the _lakefs/ directory and restoring its refs
+		repo, err := c.Catalog.CreateBareRepository(ctx, body.Name, storageID, storageNamespace, defaultBranch, swag.BoolValue(body.ReadOnly))
+		if c.handleAPIError(ctx, w, r, err) {
+			return
+		}
+		response := apigen.Repository{
+			CreationDate:     repo.CreationDate.Unix(),
+			DefaultBranch:    repo.DefaultBranch,
+			Id:               repo.Name,
+			StorageId:        swag.String(repo.StorageID),
+			StorageNamespace: repo.StorageNamespace,
+		}
+		writeResponse(w, r, http.StatusCreated, response)
+		return
+	}
+
+	newRepo, err := c.Catalog.CreateRepository(ctx, body.Name, storageID, storageNamespace, defaultBranch, swag.BoolValue(body.ReadOnly))
 	if err != nil {
 		c.handleAPIError(ctx, w, r, fmt.Errorf("error creating repository: %w", err))
 		return
@@ -2030,14 +2120,19 @@ func (c *Controller) CreateRepository(w http.ResponseWriter, r *http.Request, bo
 		CreationDate:     newRepo.CreationDate.Unix(),
 		DefaultBranch:    newRepo.DefaultBranch,
 		Id:               newRepo.Name,
+		StorageId:        swag.String(newRepo.StorageID),
 		StorageNamespace: newRepo.StorageNamespace,
 		ReadOnly:         swag.Bool(newRepo.ReadOnly),
 	}
 	writeResponse(w, r, http.StatusCreated, response)
 }
 
-func (c *Controller) validateStorageNamespace(storageNamespace string) error {
-	validRegex := c.BlockAdapter.GetStorageNamespaceInfo().ValidityRegex
+func (c *Controller) validateStorageNamespace(storageID, storageNamespace string) error {
+	info := c.BlockAdapter.GetStorageNamespaceInfo(storageID)
+	if info == nil {
+		return fmt.Errorf("no storage namespace info found for id %s: %w", storageID, config.ErrNoStorageConfig)
+	}
+	validRegex := info.ValidityRegex
 	storagePrefixRegex, err := regexp.Compile(validRegex)
 	if err != nil {
 		return fmt.Errorf("failed to compile validity regex %s: %w", validRegex, block.ErrInvalidNamespace)
@@ -2048,20 +2143,21 @@ func (c *Controller) validateStorageNamespace(storageNamespace string) error {
 	return nil
 }
 
-func (c *Controller) ensureStorageNamespace(ctx context.Context, storageNamespace string) error {
+func (c *Controller) ensureStorageNamespace(ctx context.Context, storageID, storageNamespace string) error {
 	const (
 		dummyData    = "this is dummy data - created by lakeFS to check accessibility"
 		dummyObjName = "dummy"
 	)
-	dummyKey := fmt.Sprintf("%s/%s", c.Config.Committed.BlockStoragePrefix, dummyObjName)
+	dummyKey := fmt.Sprintf("%s/%s", c.Config.GetBaseConfig().Committed.BlockStoragePrefix, dummyObjName)
 
 	objLen := int64(len(dummyData))
 
 	// check if the dummy file exist in the root of the storage namespace
 	// this serves two purposes, first, we maintain safety check for older lakeFS version.
 	// second, in scenarios where lakeFS shouldn't have access to the root namespace (i.e pre-sign URL only).
-	if c.Config.Graveler.EnsureReadableRootNamespace {
+	if c.Config.GetBaseConfig().Graveler.EnsureReadableRootNamespace {
 		rootObj := block.ObjectPointer{
+			StorageID:        storageID,
 			StorageNamespace: storageNamespace,
 			IdentifierType:   block.IdentifierTypeRelative,
 			Identifier:       dummyObjName,
@@ -2069,8 +2165,8 @@ func (c *Controller) ensureStorageNamespace(ctx context.Context, storageNamespac
 
 		if s, err := c.BlockAdapter.Get(ctx, rootObj); err == nil {
 			_ = s.Close()
-			return fmt.Errorf("found lakeFS objects in the storage namespace root(%s): %w",
-				storageNamespace, ErrStorageNamespaceInUse)
+			return fmt.Errorf("found lakeFS objects in the storage root (%s:%s): %w",
+				storageID, storageNamespace, ErrStorageNamespaceInUse)
 		} else if !errors.Is(err, block.ErrDataNotFound) {
 			return err
 		}
@@ -2078,6 +2174,7 @@ func (c *Controller) ensureStorageNamespace(ctx context.Context, storageNamespac
 
 	// check if the dummy file exists
 	obj := block.ObjectPointer{
+		StorageID:        storageID,
 		StorageNamespace: storageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       dummyKey,
@@ -2085,18 +2182,22 @@ func (c *Controller) ensureStorageNamespace(ctx context.Context, storageNamespac
 
 	if s, err := c.BlockAdapter.Get(ctx, obj); err == nil {
 		_ = s.Close()
-		return fmt.Errorf("found lakeFS objects in the storage namespace(%s) key(%s): %w",
-			storageNamespace, obj.Identifier, ErrStorageNamespaceInUse)
+		return fmt.Errorf("found lakeFS objects in the storage (%s:%s) key(%s): %w",
+			storageID, storageNamespace, obj.Identifier, ErrStorageNamespaceInUse)
 	} else if !errors.Is(err, block.ErrDataNotFound) {
 		return err
 	}
 
-	if err := c.BlockAdapter.Put(ctx, obj, objLen, strings.NewReader(dummyData), block.PutOpts{}); err != nil {
+	if _, err := c.BlockAdapter.Put(ctx, obj, objLen, strings.NewReader(dummyData), block.PutOpts{}); err != nil {
 		return err
 	}
 
-	_, err := c.BlockAdapter.Get(ctx, obj)
-	return err
+	s, err := c.BlockAdapter.Get(ctx, obj)
+	if err != nil {
+		return err
+	}
+	_ = s.Close()
+	return nil
 }
 
 func (c *Controller) DeleteRepository(w http.ResponseWriter, r *http.Request, repository string, params apigen.DeleteRepositoryParams) {
@@ -2135,6 +2236,7 @@ func (c *Controller) GetRepository(w http.ResponseWriter, r *http.Request, repos
 			CreationDate:     repo.CreationDate.Unix(),
 			DefaultBranch:    repo.DefaultBranch,
 			Id:               repo.Name,
+			StorageId:        swag.String(repo.StorageID),
 			StorageNamespace: repo.StorageNamespace,
 			ReadOnly:         swag.Bool(repo.ReadOnly),
 		}
@@ -2309,11 +2411,11 @@ func (c *Controller) SetGCRules(w http.ResponseWriter, r *http.Request, body api
 	}
 	ctx := r.Context()
 	rules := &graveler.GarbageCollectionRules{
-		DefaultRetentionDays: int32(body.DefaultRetentionDays),
+		DefaultRetentionDays: int32(body.DefaultRetentionDays), //nolint:gosec
 		BranchRetentionDays:  make(map[string]int32),
 	}
 	for _, rule := range body.Branches {
-		rules.BranchRetentionDays[rule.BranchId] = int32(rule.RetentionDays)
+		rules.BranchRetentionDays[rule.BranchId] = int32(rule.RetentionDays) //nolint:gosec
 	}
 	err := c.Catalog.SetGarbageCollectionRules(ctx, repository, rules)
 	if c.handleAPIError(ctx, w, r, err) {
@@ -2523,6 +2625,7 @@ func (c *Controller) GetRunHookOutput(w http.ResponseWriter, r *http.Request, re
 
 	logPath := taskResult.LogPath()
 	reader, err := c.BlockAdapter.Get(ctx, block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       logPath,
@@ -2554,8 +2657,13 @@ func (c *Controller) ListBranches(w http.ResponseWriter, r *http.Request, reposi
 	}
 	ctx := r.Context()
 	c.LogAction(ctx, "list_branches", r, repository, "", "")
-
-	res, hasMore, err := c.Catalog.ListBranches(ctx, repository, paginationPrefix(params.Prefix), paginationAmount(params.Amount), paginationAfter(params.After))
+	res, hasMore, err := c.Catalog.ListBranches(
+		ctx,
+		repository,
+		paginationPrefix(params.Prefix),
+		paginationAmount(params.Amount),
+		paginationAfter(params.After),
+		graveler.WithShowHidden(swag.BoolValue(params.ShowHidden)))
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
@@ -2586,7 +2694,14 @@ func (c *Controller) CreateBranch(w http.ResponseWriter, r *http.Request, body a
 	ctx := r.Context()
 	c.LogAction(ctx, "create_branch", r, repository, body.Name, "")
 
-	commitLog, err := c.Catalog.CreateBranch(ctx, repository, body.Name, body.Source, graveler.WithForce(swag.BoolValue(body.Force)))
+	commitLog, err := c.Catalog.CreateBranch(
+		ctx,
+		repository,
+		body.Name,
+		body.Source,
+		graveler.WithForce(swag.BoolValue(body.Force)),
+		graveler.WithHidden(swag.BoolValue(body.Hidden)),
+	)
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
@@ -2665,7 +2780,8 @@ func (c *Controller) handleAPIErrorCallback(ctx context.Context, w http.Response
 	case errors.Is(err, graveler.ErrNotFound),
 		errors.Is(err, actions.ErrNotFound),
 		errors.Is(err, auth.ErrNotFound),
-		errors.Is(err, kv.ErrNotFound):
+		errors.Is(err, kv.ErrNotFound),
+		errors.Is(err, config.ErrNoStorageConfig):
 		log.Debug("Not found")
 		cb(w, r, http.StatusNotFound, err)
 
@@ -2697,7 +2813,9 @@ func (c *Controller) handleAPIErrorCallback(ctx context.Context, w http.Response
 		errors.Is(err, graveler.ErrInvalidMergeStrategy),
 		errors.Is(err, block.ErrInvalidAddress),
 		errors.Is(err, block.ErrOperationNotSupported),
-		errors.Is(err, authentication.ErrInvalidRequest):
+		errors.Is(err, authentication.ErrInvalidRequest),
+		errors.Is(err, graveler.ErrSameBranch),
+		errors.Is(err, graveler.ErrInvalidPullRequestStatus):
 		log.Debug("Bad request")
 		cb(w, r, http.StatusBadRequest, err)
 
@@ -2728,7 +2846,8 @@ func (c *Controller) handleAPIErrorCallback(ctx context.Context, w http.Response
 	case errors.Is(err, graveler.ErrPreconditionFailed):
 		log.Debug("Precondition failed")
 		cb(w, r, http.StatusPreconditionFailed, "Precondition failed")
-	case errors.Is(err, authentication.ErrNotImplemented):
+	case errors.Is(err, authentication.ErrNotImplemented),
+		errors.Is(err, auth.ErrNotImplemented):
 		cb(w, r, http.StatusNotImplemented, "Not implemented")
 	case errors.Is(err, authentication.ErrInsufficientPermissions):
 		c.Logger.WithContext(ctx).WithError(err).Info("User verification failed - insufficient permissions")
@@ -2994,7 +3113,7 @@ func (c *Controller) CreateCommitRecord(w http.ResponseWriter, r *http.Request, 
 		writeError(w, r, http.StatusUnauthorized, "missing user")
 		return
 	}
-	err = c.Catalog.CreateCommitRecord(ctx, repository, body.CommitId, body.Version, body.Committer, body.Message, body.MetarangeId, body.CreationDate, body.Parents, body.Metadata.AdditionalProperties, int(body.Generation), graveler.WithForce(swag.BoolValue(body.Force)))
+	err = c.Catalog.CreateCommitRecord(ctx, repository, body.CommitId, body.Version, body.Committer, body.Message, body.MetarangeId, body.CreationDate, body.Parents, body.Metadata.AdditionalProperties, int32(body.Generation), graveler.WithForce(swag.BoolValue(body.Force))) //nolint:gosec
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
@@ -3155,13 +3274,19 @@ func (c *Controller) UploadObject(w http.ResponseWriter, r *http.Request, reposi
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
 	}
+	opts := block.PutOpts{StorageClass: params.StorageClass}
 
 	var blob *upload.Blob
 	if mediaType != "multipart/form-data" {
 		// handle non-multipart, direct content upload
 		address := c.PathProvider.NewPath()
-		blob, err = upload.WriteBlob(ctx, c.BlockAdapter, repo.StorageNamespace, address, r.Body, r.ContentLength,
-			block.PutOpts{StorageClass: params.StorageClass})
+		objectPointer := block.ObjectPointer{
+			StorageID:        repo.StorageID,
+			StorageNamespace: repo.StorageNamespace,
+			IdentifierType:   block.IdentifierTypeRelative,
+			Identifier:       address,
+		}
+		blob, err = upload.WriteBlob(ctx, c.BlockAdapter, objectPointer, r.Body, r.ContentLength, opts)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, err)
 			return
@@ -3189,8 +3314,13 @@ func (c *Controller) UploadObject(w http.ResponseWriter, r *http.Request, reposi
 			partName := part.FormName()
 			if partName == "content" {
 				// upload the first "content" and exit the loop
-				address := c.PathProvider.NewPath()
-				blob, err = upload.WriteBlob(ctx, c.BlockAdapter, repo.StorageNamespace, address, part, -1, block.PutOpts{StorageClass: params.StorageClass})
+				objectPointer := block.ObjectPointer{
+					StorageID:        repo.StorageID,
+					StorageNamespace: repo.StorageNamespace,
+					IdentifierType:   block.IdentifierTypeRelative,
+					Identifier:       c.PathProvider.NewPath(),
+				}
+				blob, err = upload.WriteBlob(ctx, c.BlockAdapter, objectPointer, part, -1, opts)
 				if err != nil {
 					_ = part.Close()
 					writeError(w, r, http.StatusInternalServerError, err)
@@ -3207,11 +3337,10 @@ func (c *Controller) UploadObject(w http.ResponseWriter, r *http.Request, reposi
 		}
 	}
 	// write metadata
-	writeTime := time.Now()
 	entryBuilder := catalog.NewDBEntryBuilder().
 		Path(params.Path).
 		PhysicalAddress(blob.PhysicalAddress).
-		CreationDate(writeTime).
+		CreationDate(blob.CreationDate).
 		Size(blob.Size).
 		Checksum(blob.Checksum).
 		ContentType(contentType)
@@ -3240,7 +3369,7 @@ func (c *Controller) UploadObject(w http.ResponseWriter, r *http.Request, reposi
 		identifierType = block.IdentifierTypeRelative
 	}
 
-	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, blob.PhysicalAddress, identifierType)
+	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, blob.PhysicalAddress, identifierType)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
@@ -3248,7 +3377,7 @@ func (c *Controller) UploadObject(w http.ResponseWriter, r *http.Request, reposi
 
 	response := apigen.ObjectStats{
 		Checksum:        blob.Checksum,
-		Mtime:           writeTime.Unix(),
+		Mtime:           blob.CreationDate.Unix(),
 		Path:            params.Path,
 		PathType:        entryTypeObject,
 		PhysicalAddress: qk.Format(),
@@ -3276,16 +3405,23 @@ func (c *Controller) StageObject(w http.ResponseWriter, r *http.Request, body ap
 		return
 	}
 	// write metadata
-	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, body.PhysicalAddress, block.IdentifierTypeFull)
+	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, body.PhysicalAddress, block.IdentifierTypeFull)
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
 
 	// see what storage type this is and whether it fits our configuration
-	uriRegex := c.BlockAdapter.GetStorageNamespaceInfo().ValidityRegex
+	info := c.BlockAdapter.GetStorageNamespaceInfo(repo.StorageID)
+	if info == nil {
+		writeError(w, r, http.StatusNotFound, fmt.Sprintf("no storage namespace info for storage id: %s",
+			repo.StorageID,
+		))
+		return
+	}
+	uriRegex := info.ValidityRegex
 	if match, err := regexp.MatchString(uriRegex, body.PhysicalAddress); err != nil || !match {
 		writeError(w, r, http.StatusBadRequest, fmt.Sprintf("physical address is not valid for block adapter: %s",
-			c.BlockAdapter.BlockstoreType(),
+			c.Config.StorageConfig().GetStorageByID(repo.StorageID).BlockstoreType(),
 		))
 		return
 	}
@@ -3376,12 +3512,12 @@ func (c *Controller) CopyObject(w http.ResponseWriter, r *http.Request, body api
 	}
 
 	// copy entry
-	entry, err := c.Catalog.CopyEntry(ctx, repository, srcRef, srcPath, repository, branch, destPath, graveler.WithForce(swag.BoolValue(body.Force)))
+	entry, err := c.Catalog.CopyEntry(ctx, repository, srcRef, srcPath, repository, branch, destPath, false, nil, graveler.WithForce(swag.BoolValue(body.Force)))
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
 
-	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, entry.PhysicalAddress, block.IdentifierTypeRelative)
+	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, entry.PhysicalAddress, block.IdentifierTypeRelative)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
@@ -3424,12 +3560,14 @@ func (c *Controller) RevertBranch(w http.ResponseWriter, r *http.Request, body a
 		writeError(w, r, http.StatusUnauthorized, "user not found")
 		return
 	}
-	err = c.Catalog.Revert(ctx, repository, branch, catalog.RevertParams{
-		Reference:    body.Ref,
-		Committer:    user.Committer(),
-		ParentNumber: body.ParentNumber,
-		AllowEmpty:   swag.BoolValue(body.AllowEmpty),
-	}, graveler.WithForce(swag.BoolValue(body.Force)))
+	revertParams := catalog.RevertParams{
+		Reference:       body.Ref,
+		Committer:       user.Committer(),
+		ParentNumber:    body.ParentNumber,
+		AllowEmpty:      swag.BoolValue(body.AllowEmpty),
+		CommitOverrides: getCommitOverrides(body.CommitOverrides),
+	}
+	err = c.Catalog.Revert(ctx, repository, branch, revertParams, graveler.WithForce(swag.BoolValue(body.Force)))
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
@@ -3464,16 +3602,33 @@ func (c *Controller) CherryPick(w http.ResponseWriter, r *http.Request, body api
 		writeError(w, r, http.StatusUnauthorized, "user not found")
 		return
 	}
-	newCommit, err := c.Catalog.CherryPick(ctx, repository, branch, catalog.CherryPickParams{
-		Reference:    body.Ref,
-		Committer:    user.Committer(),
-		ParentNumber: body.ParentNumber,
-	}, graveler.WithForce(swag.BoolValue(body.Force)))
+	cherryPickParams := catalog.CherryPickParams{
+		Reference:       body.Ref,
+		Committer:       user.Committer(),
+		ParentNumber:    body.ParentNumber,
+		CommitOverrides: getCommitOverrides(body.CommitOverrides),
+	}
+
+	newCommit, err := c.Catalog.CherryPick(ctx, repository, branch, cherryPickParams, graveler.WithForce(swag.BoolValue(body.Force)))
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
 
 	commitResponse(w, r, newCommit)
+}
+
+func getCommitOverrides(commitOverrides *apigen.CommitOverrides) *graveler.CommitOverrides {
+	if commitOverrides == nil {
+		return nil
+	}
+	var metadata graveler.Metadata
+	if commitOverrides.Metadata != nil {
+		metadata = commitOverrides.Metadata.AdditionalProperties
+	}
+	return &graveler.CommitOverrides{
+		Message:  swag.StringValue(commitOverrides.Message),
+		Metadata: metadata,
+	}
 }
 
 func (c *Controller) GetCommit(w http.ResponseWriter, r *http.Request, repository, commitID string) {
@@ -3557,6 +3712,7 @@ func (c *Controller) PrepareGarbageCollectionCommits(w http.ResponseWriter, r *h
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
+	// TODO (gilo): ObjectPointer init - add StorageID here
 	presignedURL, _, err := c.BlockAdapter.GetPreSignedURL(ctx, block.ObjectPointer{
 		Identifier:     gcRunMetadata.CommitsCSVLocation,
 		IdentifierType: block.IdentifierTypeFull,
@@ -3786,10 +3942,11 @@ func (c *Controller) DumpRefs(w http.ResponseWriter, r *http.Request, repository
 		writeError(w, r, http.StatusInternalServerError, err)
 		return
 	}
-	err = c.BlockAdapter.Put(ctx, block.ObjectPointer{
+	_, err = c.BlockAdapter.Put(ctx, block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
-		Identifier:       fmt.Sprintf("%s/refs_manifest.json", c.Config.Committed.BlockStoragePrefix),
+		Identifier:       fmt.Sprintf("%s/refs_manifest.json", c.Config.GetBaseConfig().Committed.BlockStoragePrefix),
 	}, int64(len(manifestBytes)), bytes.NewReader(manifestBytes), block.PutOpts{})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err)
@@ -4084,7 +4241,7 @@ func (c *Controller) CreateSymlinkFile(w http.ResponseWriter, r *http.Request, r
 		}
 		// loop all entries enter to map[path] physicalAddress
 		for _, entry := range entries {
-			qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, entry.PhysicalAddress, entry.AddressType.ToIdentifierType())
+			qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, entry.PhysicalAddress, entry.AddressType.ToIdentifierType())
 			if err != nil {
 				writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("error while resolving address: %s", err))
 				return
@@ -4126,7 +4283,8 @@ func (c *Controller) CreateSymlinkFile(w http.ResponseWriter, r *http.Request, r
 func writeSymlink(ctx context.Context, repo *catalog.Repository, branch, path string, addresses []string, adapter block.Adapter) error {
 	address := fmt.Sprintf("%s/%s/%s/%s/symlink.txt", lakeFSPrefix, repo.Name, branch, path)
 	data := strings.Join(addresses, "\n")
-	err := adapter.Put(ctx, block.ObjectPointer{
+	_, err := adapter.Put(ctx, block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       address,
@@ -4334,6 +4492,7 @@ func (c *Controller) GetMetadataObject(w http.ResponseWriter, r *http.Request, r
 
 	// if pre-sign, return a redirect
 	pointer := block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       objPath,
@@ -4385,6 +4544,7 @@ func (c *Controller) GetObject(w http.ResponseWriter, r *http.Request, repositor
 	}
 	ctx := r.Context()
 	c.LogAction(ctx, "get_object", r, repository, ref, "")
+	requestStart := time.Now()
 
 	repo, err := c.Catalog.GetRepository(ctx, repository)
 	if c.handleAPIError(ctx, w, r, err) {
@@ -4413,6 +4573,7 @@ func (c *Controller) GetObject(w http.ResponseWriter, r *http.Request, repositor
 
 	// if pre-sign, return a redirect
 	pointer := block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   entry.AddressType.ToIdentifierType(),
 		Identifier:       entry.PhysicalAddress,
@@ -4468,6 +4629,11 @@ func (c *Controller) GetObject(w http.ResponseWriter, r *http.Request, repositor
 		w.Header().Set("Content-Length", fmt.Sprint(entry.Size))
 	}
 
+	// time to first byte - include out part of the processing without the actual data transfer
+	requestTTFBHistograms.
+		WithLabelValues("GetObject").
+		Observe(time.Since(requestStart).Seconds())
+
 	// copy the content
 	_, err = io.Copy(w, reader)
 	if err != nil {
@@ -4514,7 +4680,7 @@ func (c *Controller) ListObjects(w http.ResponseWriter, r *http.Request, reposit
 
 	objList := make([]apigen.ObjectStats, 0, len(res))
 	for _, entry := range res {
-		qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, entry.PhysicalAddress, entry.AddressType.ToIdentifierType())
+		qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, entry.PhysicalAddress, entry.AddressType.ToIdentifierType())
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, err)
 			return
@@ -4559,6 +4725,7 @@ func (c *Controller) ListObjects(w http.ResponseWriter, r *http.Request, reposit
 				if authResponse.Allowed {
 					var expiry time.Time
 					objStat.PhysicalAddress, expiry, err = c.BlockAdapter.GetPreSignedURL(ctx, block.ObjectPointer{
+						StorageID:        repo.StorageID,
 						StorageNamespace: repo.StorageNamespace,
 						IdentifierType:   entry.AddressType.ToIdentifierType(),
 						Identifier:       entry.PhysicalAddress,
@@ -4611,7 +4778,7 @@ func (c *Controller) StatObject(w http.ResponseWriter, r *http.Request, reposito
 		return
 	}
 
-	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageNamespace, entry.PhysicalAddress, entry.AddressType.ToIdentifierType())
+	qk, err := c.BlockAdapter.ResolveNamespace(repo.StorageID, repo.StorageNamespace, entry.PhysicalAddress, entry.AddressType.ToIdentifierType())
 	if c.handleAPIError(ctx, w, r, err) {
 		return
 	}
@@ -4641,6 +4808,7 @@ func (c *Controller) StatObject(w http.ResponseWriter, r *http.Request, reposito
 	} else if swag.BoolValue(params.Presign) {
 		// need to pre-sign the physical address
 		preSignedURL, expiry, err := c.BlockAdapter.GetPreSignedURL(ctx, block.ObjectPointer{
+			StorageID:        repo.StorageID,
 			StorageNamespace: repo.StorageNamespace,
 			IdentifierType:   entry.AddressType.ToIdentifierType(),
 			Identifier:       entry.PhysicalAddress,
@@ -4654,6 +4822,27 @@ func (c *Controller) StatObject(w http.ResponseWriter, r *http.Request, reposito
 		}
 	}
 	writeResponse(w, r, code, objStat)
+}
+
+func (c *Controller) UpdateObjectUserMetadata(w http.ResponseWriter, r *http.Request, body apigen.UpdateObjectUserMetadataJSONRequestBody, repository, branch string, params apigen.UpdateObjectUserMetadataParams) {
+	if !c.authorize(w, r, permissions.Node{
+		Permission: permissions.Permission{
+			Action:   permissions.WriteObjectAction,
+			Resource: permissions.ObjectArn(repository, params.Path),
+		},
+	}) {
+		return
+	}
+	ctx := r.Context()
+	c.LogAction(ctx, "update_object_user_metadata", r, repository, branch, "")
+
+	newUserMetadata := body.Set.AdditionalProperties
+	err := c.Catalog.UpdateEntryUserMetadata(ctx, repository, branch, params.Path, newUserMetadata)
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	writeResponse(w, r, http.StatusNoContent, nil)
 }
 
 func (c *Controller) GetUnderlyingProperties(w http.ResponseWriter, r *http.Request, repository, ref string, params apigen.GetUnderlyingPropertiesParams) {
@@ -4681,6 +4870,7 @@ func (c *Controller) GetUnderlyingProperties(w http.ResponseWriter, r *http.Requ
 
 	// read object properties from underlying storage
 	properties, err := c.BlockAdapter.GetProperties(ctx, block.ObjectPointer{
+		StorageID:        repo.StorageID,
 		StorageNamespace: repo.StorageNamespace,
 		IdentifierType:   entry.AddressType.ToIdentifierType(),
 		Identifier:       entry.PhysicalAddress,
@@ -4723,7 +4913,10 @@ func (c *Controller) MergeIntoBranch(w http.ResponseWriter, r *http.Request, bod
 		swag.StringValue(body.Message),
 		metadata,
 		swag.StringValue(body.Strategy),
-		graveler.WithForce(swag.BoolValue(body.Force)))
+		graveler.WithForce(swag.BoolValue(body.Force)),
+		graveler.WithAllowEmpty(swag.BoolValue(body.AllowEmpty)),
+		graveler.WithSquashMerge(swag.BoolValue(body.SquashMerge)),
+	)
 
 	if errors.Is(err, graveler.ErrConflictFound) {
 		writeResponse(w, r, http.StatusConflict, apigen.MergeResult{
@@ -4856,8 +5049,8 @@ func (c *Controller) GetTag(w http.ResponseWriter, r *http.Request, repository, 
 	writeResponse(w, r, http.StatusOK, response)
 }
 
-func newLoginConfig(c *config.Config) *apigen.LoginConfig {
-	return &apigen.LoginConfig{
+func newLoginConfig(c *config.BaseConfig) *apigen.LoginConfig {
+	loginConfig := &apigen.LoginConfig{
 		RBAC:               &c.Auth.UIConfig.RBAC,
 		LoginUrl:           c.Auth.UIConfig.LoginURL,
 		LoginFailedMessage: &c.Auth.UIConfig.LoginFailedMessage,
@@ -4866,16 +5059,21 @@ func newLoginConfig(c *config.Config) *apigen.LoginConfig {
 		LoginCookieNames:   c.Auth.UIConfig.LoginCookieNames,
 		LogoutUrl:          c.Auth.UIConfig.LogoutURL,
 	}
+	if c.UseUILoginPlaceholders() {
+		loginConfig.UsernameUiPlaceholder = swag.String(usernamePlaceholder)
+		loginConfig.PasswordUiPlaceholder = swag.String(passwordPlaceholder)
+	}
+	return loginConfig
 }
 
 func (c *Controller) GetSetupState(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// external auth reports as initialized to avoid triggering the setup wizard
-	if c.Config.Auth.UIConfig.RBAC == config.AuthRBACExternal {
+	if c.Config.GetBaseConfig().Auth.UIConfig.RBAC == config.AuthRBACExternal {
 		response := apigen.SetupState{
 			State:            swag.String(string(auth.SetupStateInitialized)),
-			LoginConfig:      newLoginConfig(c.Config),
+			LoginConfig:      newLoginConfig(c.Config.GetBaseConfig()),
 			CommPrefsMissing: swag.Bool(false),
 		}
 		writeResponse(w, r, http.StatusOK, response)
@@ -4893,13 +5091,13 @@ func (c *Controller) GetSetupState(w http.ResponseWriter, r *http.Request) {
 
 	response := apigen.SetupState{
 		State:       swag.String(string(savedState)),
-		LoginConfig: newLoginConfig(c.Config),
+		LoginConfig: newLoginConfig(c.Config.GetBaseConfig()),
 	}
 
 	// if email subscription is disabled in the config, set the missing flag to false.
 	// otherwise, check if the comm prefs are set.
 	// if they are, set the missing flag to false.
-	if !c.Config.EmailSubscription.Enabled {
+	if !c.Config.GetBaseConfig().EmailSubscription.Enabled {
 		response.CommPrefsMissing = swag.Bool(false)
 		writeResponse(w, r, http.StatusOK, response)
 		return
@@ -4946,7 +5144,7 @@ func (c *Controller) Setup(w http.ResponseWriter, r *http.Request, body apigen.S
 		return
 	}
 
-	if c.Config.Auth.UIConfig.RBAC == config.AuthRBACExternal {
+	if c.Config.GetBaseConfig().Auth.UIConfig.RBAC == config.AuthRBACExternal {
 		// nothing to do - users are managed elsewhere
 		writeResponse(w, r, http.StatusOK, apigen.CredentialsWithSecret{})
 		return
@@ -4954,9 +5152,9 @@ func (c *Controller) Setup(w http.ResponseWriter, r *http.Request, body apigen.S
 
 	var cred *model.Credential
 	if body.Key == nil {
-		cred, err = setup.CreateInitialAdminUser(ctx, c.Auth, c.Config, c.MetadataManager, body.Username)
+		cred, err = setup.CreateInitialAdminUser(ctx, c.Auth, c.Config.GetBaseConfig(), c.MetadataManager, body.Username)
 	} else {
-		cred, err = setup.CreateInitialAdminUserWithKeys(ctx, c.Auth, c.Config, c.MetadataManager, body.Username, &body.Key.AccessKeyId, &body.Key.SecretAccessKey)
+		cred, err = setup.CreateInitialAdminUserWithKeys(ctx, c.Auth, c.Config.GetBaseConfig(), c.MetadataManager, body.Username, &body.Key.AccessKeyId, &body.Key.SecretAccessKey)
 	}
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err)
@@ -5011,7 +5209,7 @@ func (c *Controller) SetupCommPrefs(w http.ResponseWriter, r *http.Request, body
 		InstallationID:  installationID,
 		FeatureUpdates:  commPrefs.FeatureUpdates,
 		SecurityUpdates: commPrefs.SecurityUpdates,
-		BlockstoreType:  c.Config.BlockstoreType(),
+		BlockstoreType:  c.BlockAdapter.BlockstoreType(),
 	}
 	// collect comm prefs
 	go c.Collector.CollectCommPrefs(commPrefsED)
@@ -5064,7 +5262,7 @@ func (c *Controller) getVersionConfig() apigen.VersionConfig {
 		}
 	}
 
-	if c.Config.Security.CheckLatestVersion {
+	if c.Config.GetBaseConfig().Security.CheckLatestVersion {
 		latest, err := c.AuditChecker.CheckLatestVersion()
 		// set upgrade recommended based on latest version
 		if err != nil {
@@ -5132,7 +5330,7 @@ func (c *Controller) PostStatsEvents(w http.ResponseWriter, r *http.Request, bod
 			UserID: user.Username,
 			Client: client,
 		}
-		c.Collector.CollectEvents(ev, uint64(statsEv.Count))
+		c.Collector.CollectEvents(ev, uint64(statsEv.Count)) //nolint:gosec
 
 		c.Logger.WithContext(ctx).WithFields(logging.Fields{
 			"class":   ev.Class,
@@ -5144,6 +5342,200 @@ func (c *Controller) PostStatsEvents(w http.ResponseWriter, r *http.Request, bod
 	}
 
 	writeResponse(w, r, http.StatusNoContent, nil)
+}
+
+func (c *Controller) ListPullRequests(w http.ResponseWriter, r *http.Request, repository string, params apigen.ListPullRequestsParams) {
+	if !c.authorize(w, r, permissions.Node{
+		Permission: permissions.Permission{
+			Action:   permissions.ListPullRequestsAction,
+			Resource: permissions.RepoArn(repository),
+		},
+	}) {
+		return
+	}
+	ctx := r.Context()
+	c.LogAction(ctx, "list_pull_requests", r, repository, "", "")
+
+	res, hasMore, err := c.Catalog.ListPullRequest(ctx, repository, paginationPrefix(params.Prefix), paginationAmount(params.Amount), paginationAfter(params.After), pullRequestStatus(params.Status))
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	pulls := make([]apigen.PullRequest, 0, len(res))
+	for _, p := range res {
+		pulls = append(pulls, apigen.PullRequest{
+			PullRequestBasic: apigen.PullRequestBasic{
+				// Explicitly not passing description so to maintain permissions requirements
+				Description: nil,
+				Status:      swag.String(p.Status),
+				Title:       swag.String(p.Title),
+			},
+			Id:                p.ID,
+			Author:            p.Author,
+			CreationDate:      p.CreationDate,
+			DestinationBranch: p.DestinationBranch,
+			SourceBranch:      p.SourceBranch,
+			MergedCommitId:    nil,
+			ClosedDate:        p.ClosedDate,
+		})
+	}
+	response := apigen.PullRequestsList{
+		Results:    pulls,
+		Pagination: paginationFor(hasMore, pulls, "Id"),
+	}
+	writeResponse(w, r, http.StatusOK, response)
+}
+
+func (c *Controller) CreatePullRequest(w http.ResponseWriter, r *http.Request, body apigen.CreatePullRequestJSONRequestBody, repository string) {
+	if !c.authorize(w, r, permissions.Node{
+		Permission: permissions.Permission{
+			Action:   permissions.WritePullReqeustAction,
+			Resource: permissions.RepoArn(repository),
+		},
+	}) {
+		return
+	}
+	ctx := r.Context()
+	c.LogAction(ctx, "create_pull_request", r, repository, body.DestinationBranch, body.SourceBranch)
+
+	user, err := auth.GetUser(ctx)
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	// TODO (niro): Sanitize title and description!
+
+	pr := &catalog.PullRequest{
+		Title:             body.Title,
+		Description:       swag.StringValue(body.Description),
+		Author:            user.Username,
+		SourceBranch:      body.SourceBranch,
+		DestinationBranch: body.DestinationBranch,
+	}
+	pid, err := c.Catalog.CreatePullRequest(ctx, repository, pr)
+	response := &apigen.PullRequestCreationResponse{
+		Id: pid,
+	}
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	writeResponse(w, r, http.StatusCreated, response)
+}
+
+func (c *Controller) GetPullRequest(w http.ResponseWriter, r *http.Request, repository string, pullRequestID string) {
+	if !c.authorize(w, r, permissions.Node{
+		Permission: permissions.Permission{
+			Action:   permissions.ReadPullReqeustAction,
+			Resource: permissions.RepoArn(repository),
+		},
+	}) {
+		return
+	}
+	ctx := r.Context()
+	c.LogAction(ctx, "get_pull_request", r, repository, pullRequestID, "")
+	pr, err := c.Catalog.GetPullRequest(ctx, repository, pullRequestID)
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+	response := apigen.PullRequest{
+		PullRequestBasic: apigen.PullRequestBasic{
+			Description: swag.String(pr.Description),
+			Status:      swag.String(strings.ToLower(pr.Status.String())),
+			Title:       swag.String(pr.Title),
+		},
+		Author:            pr.Author,
+		CreationDate:      pr.CreationDate,
+		DestinationBranch: pr.Destination,
+		Id:                pullRequestID,
+		MergedCommitId:    pr.MergedCommitID,
+		SourceBranch:      pr.Source,
+		ClosedDate:        pr.ClosedDate,
+	}
+	writeResponse(w, r, http.StatusOK, response)
+}
+
+func (c *Controller) UpdatePullRequest(w http.ResponseWriter, r *http.Request, body apigen.UpdatePullRequestJSONRequestBody, repository string, pullRequestID string) {
+	if !c.authorize(w, r, permissions.Node{
+		Permission: permissions.Permission{
+			Action:   permissions.WritePullReqeustAction,
+			Resource: permissions.RepoArn(repository),
+		},
+	}) {
+		return
+	}
+	ctx := r.Context()
+	c.LogAction(ctx, "update_pull_request", r, repository, "", "")
+
+	err := c.Catalog.UpdatePullRequest(ctx, repository, pullRequestID, &graveler.UpdatePullRequest{
+		Title:       body.Title,
+		Description: body.Description,
+		Status:      body.Status,
+	})
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+	writeResponse(w, r, http.StatusNoContent, nil)
+}
+
+func (c *Controller) MergePullRequest(w http.ResponseWriter, r *http.Request, repository string, pullRequestID string) {
+	ctx := r.Context()
+	pr, err := c.Catalog.GetPullRequest(ctx, repository, pullRequestID)
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	if !c.authorize(w, r, permissions.Node{
+		Type: permissions.NodeTypeAnd,
+		Nodes: []permissions.Node{
+			{
+				Permission: permissions.Permission{
+					Action:   permissions.CreateCommitAction,
+					Resource: permissions.BranchArn(repository, pr.Destination),
+				},
+			},
+			{
+				Permission: permissions.Permission{
+					Action:   permissions.WritePullReqeustAction,
+					Resource: permissions.RepoArn(repository),
+				},
+			},
+		},
+	}) {
+		return
+	}
+
+	if pr.Status != graveler.PullRequestStatus_OPEN {
+		c.Logger.WithError(err).WithField("pr_status", pr.Status.String()).Error("pull request is not open")
+		writeError(w, r, http.StatusBadRequest, "bad pull request status")
+		return
+	}
+
+	user, err := auth.GetUser(ctx)
+	if err != nil {
+		writeError(w, r, http.StatusUnauthorized, "missing user")
+		return
+	}
+
+	// Attempt to merge branches
+	reference, err := c.Catalog.Merge(ctx, repository, pr.Destination, pr.Source, user.Committer(), "", nil, "")
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	// Update pull request status
+	status := graveler.PullRequestStatus_MERGED.String()
+	err = c.Catalog.UpdatePullRequest(ctx, repository, pullRequestID, &graveler.UpdatePullRequest{
+		Status:         &status,
+		MergedCommitID: &reference,
+	})
+	if c.handleAPIError(ctx, w, r, err) {
+		return
+	}
+
+	writeResponse(w, r, http.StatusOK, apigen.MergeResult{
+		Reference: reference,
+	})
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, code int, v interface{}) {
@@ -5195,6 +5587,13 @@ func paginationDelimiter(v *apigen.PaginationDelimiter) string {
 	return string(*v)
 }
 
+func search(v *apigen.SearchString) string {
+	if v == nil {
+		return ""
+	}
+	return string(*v)
+}
+
 func paginationAmount(v *apigen.PaginationAmount) int {
 	if v == nil {
 		return DefaultPerPage
@@ -5207,6 +5606,20 @@ func paginationAmount(v *apigen.PaginationAmount) int {
 		return DefaultPerPage
 	}
 	return i
+}
+
+func pullRequestStatus(v *string) string {
+	if v == nil {
+		return ""
+	}
+	switch *v {
+	case "open":
+		return pullRequestOpen
+	case "closed":
+		return pullRequestClosed
+	default:
+		return ""
+	}
 }
 
 func resolvePathList(objects, prefixes *[]string) []catalog.PathRecord {
@@ -5540,5 +5953,5 @@ func (c *Controller) ListUserExternalPrincipals(w http.ResponseWriter, r *http.R
 
 func (c *Controller) isExternalPrincipalNotSupported(ctx context.Context) bool {
 	// if IsAuthUISimplified true then it means the user not using RBAC model
-	return c.Config.IsAuthUISimplified() || !c.Auth.IsExternalPrincipalsEnabled(ctx)
+	return c.Config.GetBaseConfig().IsAuthUISimplified() || !c.Auth.IsExternalPrincipalsEnabled(ctx)
 }

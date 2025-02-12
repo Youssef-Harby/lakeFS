@@ -30,7 +30,7 @@ type CommittedFake struct {
 	AppliedData   AppliedData
 }
 
-func (c *CommittedFake) GetRangeIDByKey(_ context.Context, _ graveler.StorageNamespace, _ graveler.MetaRangeID, _ graveler.Key) (graveler.RangeID, error) {
+func (c *CommittedFake) GetRangeIDByKey(_ context.Context, _ graveler.StorageID, _ graveler.StorageNamespace, _ graveler.MetaRangeID, _ graveler.Key) (graveler.RangeID, error) {
 	panic("implement me")
 }
 
@@ -42,21 +42,21 @@ func (t *MetaRangeFake) ID() graveler.MetaRangeID {
 	return t.id
 }
 
-func (c *CommittedFake) Exists(context.Context, graveler.StorageNamespace, graveler.MetaRangeID) (bool, error) {
+func (c *CommittedFake) Exists(context.Context, graveler.StorageID, graveler.StorageNamespace, graveler.MetaRangeID) (bool, error) {
 	if c.Err != nil {
 		return false, c.Err
 	}
 	return true, nil
 }
 
-func (c *CommittedFake) Get(_ context.Context, _ graveler.StorageNamespace, _ graveler.MetaRangeID, key graveler.Key) (*graveler.Value, error) {
+func (c *CommittedFake) Get(_ context.Context, _ graveler.StorageID, _ graveler.StorageNamespace, _ graveler.MetaRangeID, key graveler.Key) (*graveler.Value, error) {
 	if c.Err != nil {
 		return nil, c.Err
 	}
 	return c.ValuesByKey[string(key)], nil
 }
 
-func (c *CommittedFake) List(_ context.Context, _ graveler.StorageNamespace, mr graveler.MetaRangeID) (graveler.ValueIterator, error) {
+func (c *CommittedFake) List(_ context.Context, _ graveler.StorageID, _ graveler.StorageNamespace, mr graveler.MetaRangeID) (graveler.ValueIterator, error) {
 	if c.Err != nil {
 		return nil, c.Err
 	}
@@ -66,14 +66,14 @@ func (c *CommittedFake) List(_ context.Context, _ graveler.StorageNamespace, mr 
 	return c.ValueIterator, nil
 }
 
-func (c *CommittedFake) Diff(context.Context, graveler.StorageNamespace, graveler.MetaRangeID, graveler.MetaRangeID) (graveler.DiffIterator, error) {
+func (c *CommittedFake) Diff(context.Context, graveler.StorageID, graveler.StorageNamespace, graveler.MetaRangeID, graveler.MetaRangeID) (graveler.DiffIterator, error) {
 	if c.Err != nil {
 		return nil, c.Err
 	}
 	return c.DiffIterator, nil
 }
 
-func (c *CommittedFake) Compare(context.Context, graveler.StorageNamespace, graveler.MetaRangeID, graveler.MetaRangeID, graveler.MetaRangeID) (graveler.DiffIterator, error) {
+func (c *CommittedFake) Compare(context.Context, graveler.StorageID, graveler.StorageNamespace, graveler.MetaRangeID, graveler.MetaRangeID, graveler.MetaRangeID) (graveler.DiffIterator, error) {
 	if c.Err != nil {
 		return nil, c.Err
 	}
@@ -87,14 +87,14 @@ func (c *CommittedFake) Merge(_ context.Context, _ graveler.StorageNamespace, _,
 	return c.MetaRangeID, nil
 }
 
-func (c *CommittedFake) Import(_ context.Context, _ graveler.StorageNamespace, _, _ graveler.MetaRangeID, _ []graveler.Prefix, _ ...graveler.SetOptionsFunc) (graveler.MetaRangeID, error) {
+func (c *CommittedFake) Import(_ context.Context, _ graveler.StorageID, _ graveler.StorageNamespace, _, _ graveler.MetaRangeID, _ []graveler.Prefix, _ ...graveler.SetOptionsFunc) (graveler.MetaRangeID, error) {
 	if c.Err != nil {
 		return "", c.Err
 	}
 	return c.MetaRangeID, nil
 }
 
-func (c *CommittedFake) Commit(_ context.Context, _ graveler.StorageNamespace, baseMetaRangeID graveler.MetaRangeID, changes graveler.ValueIterator, _ bool, _ ...graveler.SetOptionsFunc) (graveler.MetaRangeID, graveler.DiffSummary, error) {
+func (c *CommittedFake) Commit(_ context.Context, _ graveler.StorageID, _ graveler.StorageNamespace, baseMetaRangeID graveler.MetaRangeID, changes graveler.ValueIterator, _ bool, _ ...graveler.SetOptionsFunc) (graveler.MetaRangeID, graveler.DiffSummary, error) {
 	if c.Err != nil {
 		return "", graveler.DiffSummary{}, c.Err
 	}
@@ -103,18 +103,18 @@ func (c *CommittedFake) Commit(_ context.Context, _ graveler.StorageNamespace, b
 	return c.MetaRangeID, c.DiffSummary, nil
 }
 
-func (c *CommittedFake) WriteMetaRangeByIterator(context.Context, graveler.StorageNamespace, graveler.ValueIterator, graveler.Metadata) (*graveler.MetaRangeID, error) {
+func (c *CommittedFake) WriteMetaRangeByIterator(context.Context, graveler.StorageID, graveler.StorageNamespace, graveler.ValueIterator, graveler.Metadata) (*graveler.MetaRangeID, error) {
 	if c.Err != nil {
 		return nil, c.Err
 	}
 	return &c.MetaRangeID, nil
 }
 
-func (c *CommittedFake) WriteRange(context.Context, graveler.StorageNamespace, graveler.ValueIterator) (*graveler.RangeInfo, error) {
+func (c *CommittedFake) WriteRange(context.Context, graveler.StorageID, graveler.StorageNamespace, graveler.ValueIterator) (*graveler.RangeInfo, error) {
 	return &c.RangeInfo, nil
 }
 
-func (c *CommittedFake) WriteMetaRange(context.Context, graveler.StorageNamespace, []*graveler.RangeInfo) (*graveler.MetaRangeInfo, error) {
+func (c *CommittedFake) WriteMetaRange(context.Context, graveler.StorageID, graveler.StorageNamespace, []*graveler.RangeInfo) (*graveler.MetaRangeInfo, error) {
 	return &graveler.MetaRangeInfo{ID: c.MetaRangeID}, nil
 }
 
@@ -252,6 +252,7 @@ type RefsFake struct {
 	Commits             map[graveler.CommitID]*graveler.Commit
 	StagingToken        graveler.StagingToken
 	SealedTokens        []graveler.StagingToken
+	BaseMetaRangeID     graveler.MetaRangeID
 }
 
 func (m *RefsFake) CreateBranch(_ context.Context, _ *graveler.RepositoryRecord, _ graveler.BranchID, branch graveler.Branch) error {
@@ -302,10 +303,12 @@ func (m *RefsFake) ResolveRawRef(_ context.Context, _ *graveler.RepositoryRecord
 	var branch graveler.BranchID
 	var stagingToken graveler.StagingToken
 	var sealedTokens []graveler.StagingToken
+	var baseMetaRangeID graveler.MetaRangeID
 	if m.RefType == graveler.ReferenceTypeBranch {
 		branch = DefaultBranchID
 		stagingToken = m.StagingToken
 		sealedTokens = m.SealedTokens
+		baseMetaRangeID = m.BaseMetaRangeID
 	}
 
 	return &graveler.ResolvedRef{
@@ -313,9 +316,10 @@ func (m *RefsFake) ResolveRawRef(_ context.Context, _ *graveler.RepositoryRecord
 		BranchRecord: graveler.BranchRecord{
 			BranchID: branch,
 			Branch: &graveler.Branch{
-				CommitID:     m.CommitID,
-				StagingToken: stagingToken,
-				SealedTokens: sealedTokens,
+				CommitID:                 m.CommitID,
+				StagingToken:             stagingToken,
+				SealedTokens:             sealedTokens,
+				CompactedBaseMetaRangeID: baseMetaRangeID,
 			},
 		},
 	}, nil
@@ -362,7 +366,7 @@ func (m *RefsFake) DeleteBranch(context.Context, *graveler.RepositoryRecord, gra
 	return nil
 }
 
-func (m *RefsFake) ListBranches(context.Context, *graveler.RepositoryRecord) (graveler.BranchIterator, error) {
+func (m *RefsFake) ListBranches(context.Context, *graveler.RepositoryRecord, graveler.ListOptions) (graveler.BranchIterator, error) {
 	return m.ListBranchesRes, nil
 }
 
@@ -464,6 +468,10 @@ func (r *diffIter) Value() *graveler.Diff {
 
 func (r *diffIter) Err() error {
 	return r.err
+}
+
+func (r *diffIter) SetErr(err error) {
+	r.err = err
 }
 
 func (r *diffIter) Close() {}
@@ -879,5 +887,25 @@ func (m *RefsFake) SetRepositoryMetadata(_ context.Context, _ *graveler.Reposito
 
 func (m *RefsFake) CreateCommitRecord(_ context.Context, _ *graveler.RepositoryRecord, _ graveler.CommitID, _ graveler.Commit) error {
 	// TODO implement me
+	panic("implement me")
+}
+
+func (m *RefsFake) GetPullRequest(context.Context, *graveler.RepositoryRecord, graveler.PullRequestID) (*graveler.PullRequest, error) {
+	panic("implement me")
+}
+
+func (m *RefsFake) CreatePullRequest(context.Context, *graveler.RepositoryRecord, graveler.PullRequestID, *graveler.PullRequest) error {
+	panic("implement me")
+}
+
+func (m *RefsFake) DeletePullRequest(context.Context, *graveler.RepositoryRecord, graveler.PullRequestID) error {
+	panic("implement me")
+}
+
+func (m *RefsFake) UpdatePullRequest(context.Context, *graveler.RepositoryRecord, graveler.PullRequestID, graveler.PullUpdateFunc) error {
+	panic("implement me")
+}
+
+func (m *RefsFake) ListPullRequests(context.Context, *graveler.RepositoryRecord) (graveler.PullsIterator, error) {
 	panic("implement me")
 }

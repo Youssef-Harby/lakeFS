@@ -27,7 +27,6 @@ jobs:
         run: |
           echo "Enable next jobs based on secrets existence: ${{ env.ENABLE_NEXT_JOBS != '' }}"
           echo "secretsavailable=${{ env.ENABLE_NEXT_JOBS != '' }}" >> $GITHUB_OUTPUT
-      
 
   gen-code:
     name: Generate code from latest lakeFS app
@@ -44,18 +43,17 @@ jobs:
         run: echo "tag=sha-$(git rev-parse --short HEAD | sed s/^v//g)" >> $GITHUB_OUTPUT
 
       - name: Restore cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         id: restore-cache
         with:
           path: /tmp/generated.tar.gz
-          key: ${{ runner.os }}-go-${{ hashFiles('./pkg/**', './api/*', './webui/**') }}
-          restore-keys: ${{ runner.os }}-go-
+          key: ${{ runner.os }}-go-${{ hashFiles('./pkg/**', './api/**', './webui/**', './auth/**', './acl') }}
 
       - name: Setup Go
         if: steps.restore-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v4
         with:
-          go-version: "1.21.4"
+          go-version: "1.23"
         id: go
 
       - name: Setup NodeJS
@@ -69,21 +67,22 @@ jobs:
       - name: Generate code
         if: steps.restore-cache.outputs.cache-hit != 'true'
         run: |
-          make -j3 gen-api gen-ui VERSION=${{ steps.version.outputs.tag }}
-          tar -cf /tmp/generated.tar.gz ./webui/dist ./pkg/auth/client.gen.go ./pkg/authentication/apiclient/client.gen.go ./pkg/permissions/actions.gen.go ./pkg/api/apigen/lakefs.gen.go
+          make -j3 gen-api gen-code gen-ui VERSION=${{ steps.version.outputs.tag }}
+          go build ./contrib/auth/acl/cmd/acl
+          tar -czf /tmp/generated.tar.gz ./webui/dist ./pkg/auth/{client,service_wrapper,service_inviter_wrapper}.gen.go ./pkg/authentication/apiclient/client.gen.go ./pkg/permissions/actions.gen.go ./pkg/api/apigen/lakefs.gen.go ./acl
 
         # must upload artifact in order to download generated later
       - name: Store generated code
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: generated-code
           path: /tmp/generated.tar.gz
 
   deploy-image:
     name: Build and push Docker image
-    needs: [check-secrets, gen-code]
+    needs: [ check-secrets, gen-code ]
     if: needs.check-secrets.outputs.secretsavailable == 'true'
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ubuntu-22.04-16-cores
     outputs:
       tag: ${{ needs.gen-code.outputs.tag }}
     steps:
@@ -91,13 +90,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Retrieve generated code
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.8
         with:
           name: generated-code
           path: /tmp/
 
       - name: Unpack generated code
-        run: tar -xf /tmp/generated.tar.gz
+        run: tar -xzvf /tmp/generated.tar.gz
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -111,6 +110,7 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
+
       - name: Build and Push
         uses: docker/build-push-action@v5
         with:
@@ -124,8 +124,8 @@ jobs:
             type=s3,region=us-east-1,bucket=lakefs-docker-cache,name=lakefs,mode=max
 
   login-to-amazon-ecr:
-    runs-on: ubuntu-latest
-    needs: [check-secrets]
+    runs-on: ubuntu-22.04
+    needs: [ check-secrets ]
     if: needs.check-secrets.outputs.secretsavailable == 'true'
     steps:
       - name: Configure AWS credentials
@@ -146,8 +146,8 @@ jobs:
 
   unified-gc-test:
     name: Test unified gc
-    needs: [ gen-code, deploy-image, login-to-amazon-ecr, build-spark3-metadata-client]
-    runs-on: ubuntu-latest-8-cores
+    needs: [deploy-image, login-to-amazon-ecr, build-spark3-metadata-client]
+    runs-on: ubuntu-22.04-8-cores
     services:
       lakefs:
         image: ${{ needs.login-to-amazon-ecr.outputs.registry }}/lakefs:${{ needs.deploy-image.outputs.tag }}
@@ -201,7 +201,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: "1.21.4"
+          go-version: "1.23"
         id: go
 
       - name: Generate uniquifying value
@@ -209,17 +209,17 @@ jobs:
         run: echo "value=$RANDOM" >> $GITHUB_OUTPUT
 
       - name: Retrieve generated code
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.8
         with:
           name: generated-code
           path: /tmp/
 
       - name: Unpack generated code
         shell: bash
-        run: tar -xf /tmp/generated.tar.gz
+        run: tar -xzvf /tmp/generated.tar.gz
 
       - name: Restore cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         id: restore-cache
         with:
           path: ${{ github.workspace }}/test/spark/metaclient
@@ -275,14 +275,13 @@ jobs:
           tags: ${{ steps.login-ecr.outputs.registry }}/lakefs-rclone-export:${{ steps.version.outputs.tag }}
           context: deployments/tools/export
 
-
   hadoopfs-tests:
     name: Test lakeFS Hadoop FileSystem
     needs: [deploy-image, login-to-amazon-ecr]
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
     steps:
       - name: Check-out code
         uses: actions/checkout@v4
@@ -329,7 +328,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
 
     steps:
       - name: Check-out code
@@ -399,7 +398,7 @@ jobs:
         working-directory: clients/hadoopfs
         run: mvn -Passembly -DfinalName=client --batch-mode --update-snapshots package -DskipTests
       - name: Store lakeFS HadoopFS
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: lakefs-hadoopfs
           path: clients/hadoopfs/target/client.jar
@@ -421,7 +420,7 @@ jobs:
         working-directory: test/spark/app
         run: sbt package
       - name: Store Spark App
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: spark-apps
           path: test/spark/app/target/
@@ -439,20 +438,20 @@ jobs:
             sonnet_jar: sonnets-311/target/sonnets-311/scala-2.12/sonnets-311_2.12-0.1.0.jar
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
       SPARK_TAG: ${{ matrix.spark.tag }}
     steps:
       - name: Check-out code
         uses: actions/checkout@v4
 
       - name: Download lakeFS HadoopFS
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.8
         with:
           name: lakefs-hadoopfs
           path: clients/hadoopfs/target
 
       - name: Download Spark App
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4.1.8
         with:
           name: spark-apps
           path: test/spark/app/target/
@@ -548,7 +547,7 @@ jobs:
     env:
       LAKEFS_TAG: ${{ needs.deploy-image.outputs.tag }}
       EXPORT_TAG: ${{ needs.deploy-rclone-export-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
 
     steps:
       - name: Check-out code
@@ -593,11 +592,11 @@ jobs:
 
   metastore-client-with-trino:
     name: Test metastore client commands using trino
-    needs: [gen-code, deploy-image, login-to-amazon-ecr]
+    needs: [deploy-image, login-to-amazon-ecr]
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
     steps:
       - name: Check-out code
         uses: actions/checkout@v4
@@ -651,16 +650,16 @@ jobs:
 
   build-spark3-metadata-client:
     name: Build metadata client for Spark 3.x
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-22.04-8-cores
     needs: [check-secrets, deploy-image, login-to-amazon-ecr]
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
     steps:
       - name: Check-out code
         uses: actions/checkout@v4
       - name: Restore cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         id: restore-cache
         with:
           path: ${{ github.workspace }}/test/spark/metaclient
@@ -695,13 +694,13 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       SPARK_TAG: 3.2.1
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
       TAG: ${{ needs.deploy-image.outputs.tag }}
     steps:
       - name: Check-out code
         uses: actions/checkout@v4
       - name: Restore cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         id: restore-cache
         with:
           path: ${{ github.workspace }}/test/spark/metaclient
@@ -750,11 +749,11 @@ jobs:
 
   run-system-aws-s3-kv-dynamodb:
     name: Run latest lakeFS app on AWS S3 DynamoDB KV
-    needs: [gen-code, deploy-image, login-to-amazon-ecr]
+    needs: [deploy-image, login-to-amazon-ecr]
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       LAKEFS_DATABASE_CONNECTION_STRING: "" # Override lakeFS docker compose settings
@@ -766,12 +765,30 @@ jobs:
         id: unique
         run: echo "value=$RANDOM" >> $GITHUB_OUTPUT
 
+      # Retrieve ACL server binary from cache
+      - name: Retrieve generated code
+        uses: actions/download-artifact@v4.1.8
+        with:
+          name: generated-code
+          path: /tmp/
+
+      - name: Unpack generated code
+        run: tar -xzvf /tmp/generated.tar.gz
+
+      # Run ACL server
+      - name: Run ACL server
+        env:
+          ACLSERVER_ENCRYPT_SECRET_KEY: some random secret string # Must be the same as lakeFS
+          ACLSERVER_DATABASE_TYPE: local
+        run: ./acl run &
+
       - name: Test lakeFS with S3 tests KV
         uses: ./.github/actions/bootstrap-test-lakefs
         with:
           compose-file: esti/ops/docker-compose-dynamodb.yaml
           compose-flags: "--quiet-pull --exit-code-from=esti"
         env:
+          LAKEFS_AUTH_UI_CONFIG_RBAC: simplified
           LAKEFS_BLOCKSTORE_TYPE: s3
           LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID: ${{ secrets.ESTI_AWS_ACCESS_KEY_ID }}
           LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY: ${{ secrets.ESTI_AWS_SECRET_ACCESS_KEY }}
@@ -782,7 +799,6 @@ jobs:
           ESTI_AWS_ACCESS_KEY_ID: ${{ secrets.ESTI_AWS_ACCESS_KEY_ID }}
           ESTI_AWS_SECRET_ACCESS_KEY: ${{ secrets.ESTI_AWS_SECRET_ACCESS_KEY }}
           ESTI_VERSION: ${{ needs.deploy-image.outputs.tag }}
-          ESTI_DATABASE_KV_ENABLED: "true"
           ESTI_DATABASE_CONNECTION_STRING: "true"
 
       - name: Check files in S3 bucket KV
@@ -805,11 +821,14 @@ jobs:
 
   run-system-aws-s3:
     name: Run latest lakeFS app on AWS S3
-    needs: [gen-code, deploy-image, login-to-amazon-ecr]
+    needs: [deploy-image, login-to-amazon-ecr]
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        branch_ownership: [false, true]
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     steps:
@@ -820,22 +839,42 @@ jobs:
         id: unique
         run: echo "value=$RANDOM" >> $GITHUB_OUTPUT
 
+      # Retrieve ACL server binary from cache
+      - name: Retrieve generated code
+        uses: actions/download-artifact@v4.1.8
+        with:
+          name: generated-code
+          path: /tmp/
+
+      - name: Unpack generated code
+        run: tar -xzvf /tmp/generated.tar.gz
+
+      # Run ACL server
+      - name: Run ACL server
+        env:
+          ACLSERVER_ENCRYPT_SECRET_KEY: some random secret string # Must be the same as lakeFS
+          ACLSERVER_DATABASE_TYPE: local
+        run: ./acl run &
+
       - name: Test lakeFS with S3 tests
         uses: ./.github/actions/bootstrap-test-lakefs
         with:
           compose-file: esti/ops/docker-compose.yaml
           compose-flags: "--quiet-pull --exit-code-from=esti"
         env:
+          LAKEFS_AUTH_UI_CONFIG_RBAC: simplified
           LAKEFS_BLOCKSTORE_TYPE: s3
           LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID: ${{ secrets.ESTI_AWS_ACCESS_KEY_ID }}
           LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY: ${{ secrets.ESTI_AWS_SECRET_ACCESS_KEY }}
-          LAKEFS_DATABASE_TYPE: postgres
+          LAKEFS_GRAVELER_BRANCH_OWNERSHIP_ENABLED: ${{ matrix.branch_ownership }}
           DOCKER_REG: ${{ needs.login-to-amazon-ecr.outputs.registry }}
           ESTI_BLOCKSTORE_TYPE: s3
           ESTI_STORAGE_NAMESPACE: s3://esti-system-testing/${{ github.run_number }}/${{ steps.unique.outputs.value }}
           ESTI_AWS_ACCESS_KEY_ID: ${{ secrets.ESTI_AWS_ACCESS_KEY_ID }}
           ESTI_AWS_SECRET_ACCESS_KEY: ${{ secrets.ESTI_AWS_SECRET_ACCESS_KEY }}
           ESTI_VERSION: ${{ needs.deploy-image.outputs.tag }}
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_HAGRID_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_HAGRID_CLIENT_SECRET }}
 
       - name: Check files in S3 bucket
         run: |
@@ -857,11 +896,11 @@ jobs:
 
   run-system-gcp-gs:
     name: Run latest lakeFS app on Google Cloud Platform and Google Cloud Storage
-    needs: [gen-code, deploy-image, login-to-amazon-ecr]
+    needs: [deploy-image, login-to-amazon-ecr]
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     steps:
@@ -872,6 +911,23 @@ jobs:
         id: unique
         run: echo "value=$RANDOM" >> $GITHUB_OUTPUT
 
+      # Retrieve ACL server binary from cache
+      - name: Retrieve generated code
+        uses: actions/download-artifact@v4.1.8
+        with:
+          name: generated-code
+          path: /tmp/
+
+      - name: Unpack generated code
+        run: tar -xzvf /tmp/generated.tar.gz
+
+      # Run ACL server
+      - name: Run ACL server
+        env:
+          ACLSERVER_ENCRYPT_SECRET_KEY: some random secret string # Must be the same as lakeFS
+          ACLSERVER_DATABASE_TYPE: local
+        run: ./acl run &
+
       - name: Start lakeFS with GS tests
         uses: ./.github/actions/bootstrap-test-lakefs
         with:
@@ -879,8 +935,8 @@ jobs:
           compose-flags: "--quiet-pull --exit-code-from=esti"
         env:
           DOCKER_REG: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+          LAKEFS_AUTH_UI_CONFIG_RBAC: simplified
           LAKEFS_BLOCKSTORE_TYPE: gs
-          LAKEFS_DATABASE_TYPE: postgres
           LAKEFS_BLOCKSTORE_GS_CREDENTIALS_JSON: ${{ secrets.LAKEFS_BLOCKSTORE_GS_CREDENTIALS_JSON }}
           ESTI_BLOCKSTORE_TYPE: gs
           ESTI_STORAGE_NAMESPACE: gs://esti-system-testing/${{ github.run_number }}/${{ steps.unique.outputs.value }}
@@ -892,11 +948,11 @@ jobs:
 
   run-system-azure-abfs:
     name: Run latest lakeFS app on Azure with Azure blobstore
-    needs: [gen-code, deploy-image, login-to-amazon-ecr]
+    needs: [deploy-image, login-to-amazon-ecr]
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -910,6 +966,23 @@ jobs:
         id: unique
         run: echo "value=$RANDOM" >> $GITHUB_OUTPUT
 
+      # Retrieve ACL server binary from cache
+      - name: Retrieve generated code
+        uses: actions/download-artifact@v4.1.8
+        with:
+          name: generated-code
+          path: /tmp/
+
+      - name: Unpack generated code
+        run: tar -xzvf /tmp/generated.tar.gz
+
+      # Run ACL server
+      - name: Run ACL server
+        env:
+          ACLSERVER_ENCRYPT_SECRET_KEY: some random secret string # Must be the same as lakeFS
+          ACLSERVER_DATABASE_TYPE: local
+        run: ./acl run &
+
       - name: Start lakeFS with Azure tests
         uses: ./.github/actions/bootstrap-test-lakefs
         with:
@@ -917,7 +990,7 @@ jobs:
           compose-flags: "--quiet-pull --exit-code-from=esti"
         env:
           DOCKER_REG: ${{ needs.login-to-amazon-ecr.outputs.registry }}
-          LAKEFS_DATABASE_TYPE: postgres
+          LAKEFS_AUTH_UI_CONFIG_RBAC: simplified
           LAKEFS_BLOCKSTORE_TYPE: azure
           ESTI_AZURE_STORAGE_ACCOUNT: esti
           ESTI_AZURE_STORAGE_ACCESS_KEY: ${{ secrets.LAKEFS_BLOCKSTORE_AZURE_STORAGE_ACCESS_KEY }}
@@ -934,11 +1007,11 @@ jobs:
 
   run-system-azure-adls-gen2:
     name: Run latest lakeFS app on Azure with Azure Data Lake Storage Gen2 and CosmosDB
-    needs: [gen-code, deploy-image, login-to-amazon-ecr]
+    needs: [deploy-image, login-to-amazon-ecr]
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -948,17 +1021,29 @@ jobs:
       COSMOSDB_ACCOUNT: esti-e2e-tests
 
     steps:
-      - name: Azure log-in
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
       - name: Check-out code
         uses: actions/checkout@v4
 
       - name: Generate uniquifying value
         id: unique
         run: echo "value=$RANDOM" >> $GITHUB_OUTPUT
+
+      # Retrieve ACL server binary from cache
+      - name: Retrieve generated code
+        uses: actions/download-artifact@v4.1.8
+        with:
+          name: generated-code
+          path: /tmp/
+
+      - name: Unpack generated code
+        run: tar -xzvf /tmp/generated.tar.gz
+
+      # Run ACL server
+      - name: Run ACL server
+        env:
+          ACLSERVER_ENCRYPT_SECRET_KEY: some random secret string # Must be the same as lakeFS
+          ACLSERVER_DATABASE_TYPE: local
+        run: ./acl run &
 
       - name: Start lakeFS with Azure tests
         uses: ./.github/actions/bootstrap-test-lakefs
@@ -967,21 +1052,27 @@ jobs:
           compose-flags: "--quiet-pull --exit-code-from=esti"
         env:
           DOCKER_REG: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+          LAKEFS_AUTH_UI_CONFIG_RBAC: simplified
           LAKEFS_DATABASE_TYPE: cosmosdb
           LAKEFS_DATABASE_COSMOSDB_ENDPOINT: "https://${{ env.COSMOSDB_ACCOUNT }}.documents.azure.com"
           LAKEFS_DATABASE_COSMOSDB_DATABASE: ${{ env.COSMOSDB_DATABASE }}
           LAKEFS_DATABASE_COSMOSDB_CONTAINER: ${{ github.run_number }}-${{ steps.unique.outputs.value }}
           LAKEFS_DATABASE_COSMOSDB_KEY: ${{ secrets.LAKEFS_DATABASE_COSMOSDB_READWRITEKEY }}
-          LAKEFS_BLOCKSTORE_TYPE: azure
           ESTI_BLOCKSTORE_TYPE: azure
           ESTI_STORAGE_NAMESPACE: https://esti4hns.blob.core.windows.net/esti-system-testing/${{ github.run_number }}/${{ steps.unique.outputs.value }}
           ESTI_LARGE_OBJECT_PATH: https://esti4hns.blob.core.windows.net/esti-system-testing-data/copy-test-data/data.6mib
           ESTI_AZURE_STORAGE_ACCOUNT: esti4hns
           ESTI_AZURE_STORAGE_ACCESS_KEY: ${{ secrets.LAKEFS_BLOCKSTORE_AZURE_STORAGE_GEN2_ACCESS_KEY }}
 
+      - name: Az CLI login
+        if: always()
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_COSMOSDB_CLEANUP_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: cleanup cosmos db container
         if: always()
-        continue-on-error: true
         run: |
           echo "Delete database container: ${{ github.run_number }}-${{ steps.unique.outputs.value }}"
           az cosmosdb sql container delete -a ${{ env.COSMOSDB_ACCOUNT }} -g ${{ env.COSMOSDB_ACCOUNT }} -d ${{ env.COSMOSDB_DATABASE }} -n ${{ github.run_number }}-${{ steps.unique.outputs.value }} --yes
@@ -997,7 +1088,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.deploy-image.outputs.tag }}
-      REPO: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
       LAKEFS_INSTALLATION_ACCESS_KEY_ID: AKIAIOSFDNN7EXAMPLEQ
       LAKEFS_INSTALLATION_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
@@ -1036,7 +1127,7 @@ jobs:
       - name: Generate uniquifying value
         id: unique
         run: echo "value=$RANDOM" >> $GITHUB_OUTPUT
-        
+
       - name: Run Python Wrapper Tests
         uses: pavelzw/pytest-action@v2
         env:
@@ -1058,7 +1149,7 @@ jobs:
     needs: 
       - deploy-image
       - login-to-amazon-ecr
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-22.04-8-cores
     timeout-minutes: 20
     services:
       dynamodb:
@@ -1095,7 +1186,7 @@ jobs:
         working-directory: webui
         run: echo "PLAYWRIGHT_VERSION=$(node -e "console.log(require('./package-lock.json').dependencies['@playwright/test'].version)")" >> $GITHUB_ENV
       - name: Cache Playwright binaries
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         id: playwright-cache
         with:
           path: |
@@ -1117,7 +1208,7 @@ jobs:
           BASE_URL: http://localhost:8000
         working-directory: webui
         run: npx playwright test --project=common
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         if: (success() || failure())
         with:
           name: playwright-report
@@ -1151,7 +1242,7 @@ jobs:
             // 3. Prepare format of the comment
             const output = `
               # E2E Test Results - ${process.env.PLAYWRIGHT_PROJECT}
-              
+
               ${content}
             `;
 
@@ -1171,3 +1262,173 @@ jobs:
                 body: output
               })
             }
+
+  quickstart:
+    name: Quickstart
+    needs: 
+      - deploy-image
+      - login-to-amazon-ecr
+    runs-on: ubuntu-22.04-8-cores
+    timeout-minutes: 20
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:1.13.6
+      lakefs:
+        image: ${{ needs.login-to-amazon-ecr.outputs.registry }}/lakefs:${{ needs.deploy-image.outputs.tag }}
+        credentials:
+          username: ${{ needs.login-to-amazon-ecr.outputs.docker_username }}
+          password: ${{ needs.login-to-amazon-ecr.outputs.docker_password }}
+        ports:
+          - '8000:8000'
+        env:
+          LAKEFS_DATABASE_TYPE: dynamodb
+          LAKEFS_DATABASE_DYNAMODB_ENDPOINT: http://dynamodb:8000
+          LAKEFS_DATABASE_DYNAMODB_AWS_ACCESS_KEY_ID: AKIAIOSFDNN7EXAMPLEQ
+          LAKEFS_DATABASE_DYNAMODB_AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+          LAKEFS_BLOCKSTORE_TYPE: local
+          LAKEFS_EMAIL_SUBSCRIPTION_ENABLED: true
+          LAKEFS_AUTH_ENCRYPT_SECRET_KEY: some random secret string
+          LAKEFS_STATS_ENABLED: false
+          LAKEFS_LOGGING_LEVEL: DEBUG
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+          cache: "npm"
+          cache-dependency-path: webui/package-lock.json
+      - name: Install dependencies
+        working-directory: webui
+        run: npm ci
+      - name: Get installed Playwright version
+        id: playwright-version
+        working-directory: webui
+        run: echo "PLAYWRIGHT_VERSION=$(node -e "console.log(require('./package-lock.json').dependencies['@playwright/test'].version)")" >> $GITHUB_ENV
+      - name: Cache Playwright binaries
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/ms-playwright-*
+          key: ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - name: Install browsers (no cache)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: webui
+        run: npx playwright install --with-deps chromium
+      - name: Install browsers (with cache)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: webui
+        run: npx playwright install-deps chromium
+      - name: Playwright run
+        env:
+          BASE_URL: http://localhost:8000
+        working-directory: webui
+        run: npx playwright test --project=quickstart
+      - uses: actions/upload-artifact@v4
+        if: (success() || failure())
+        with:
+          name: playwright-report
+          path: webui/test-results/
+          retention-days: 7
+      - uses: test-summary/action@v2
+        if: ${{ github.event_name == 'pull_request' && (success() || failure()) }}
+        with:
+          paths: webui/test-results.xml
+          output: "quickstart-test-results.md"
+      # will test and move to using the composite action once it's merged to master (GH limitation)
+      - uses: actions/github-script@v6
+        if: ${{ github.event_name == 'pull_request' && (success() || failure()) }}
+        env:
+          PLAYWRIGHT_PROJECT: "Quickstart"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require("fs");
+            // 1. Retrieve existing bot comments for the PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && comment.body.includes(`E2E Test Results - ${process.env.PLAYWRIGHT_PROJECT}`)
+            })
+            // 2. Read markdown files
+            const content = fs.readFileSync("quickstart-test-results.md");
+            // 3. Prepare format of the comment
+            const output = `
+              # E2E Test Results - ${process.env.PLAYWRIGHT_PROJECT}
+
+              ${content}
+            `;
+
+            // 4. If we have a comment, update it, otherwise create a new one
+            if (botComment) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              })
+            } else {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              })
+            }
+
+  run-system-aws-s3-basic-auth:
+    name: Run latest lakeFS app on AWS S3 + Basic Auth
+    needs: [deploy-image, login-to-amazon-ecr]
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ needs.deploy-image.outputs.tag }}
+      REGISTRY: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Check-out code
+        uses: actions/checkout@v4
+
+      - name: Generate uniquifying value
+        id: unique
+        run: echo "value=$RANDOM" >> $GITHUB_OUTPUT
+
+      - name: Test lakeFS with S3 tests + Basic Auth
+        uses: ./.github/actions/bootstrap-test-lakefs
+        with:
+          compose-file: esti/ops/docker-compose.yaml
+          compose-flags: "--quiet-pull --exit-code-from=esti"
+        env:
+          LAKEFS_BLOCKSTORE_TYPE: s3
+          LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID: ${{ secrets.ESTI_AWS_ACCESS_KEY_ID }}
+          LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY: ${{ secrets.ESTI_AWS_SECRET_ACCESS_KEY }}
+          DOCKER_REG: ${{ needs.login-to-amazon-ecr.outputs.registry }}
+          ESTI_BLOCKSTORE_TYPE: s3
+          ESTI_STORAGE_NAMESPACE: s3://esti-system-testing/${{ github.run_number }}/${{ steps.unique.outputs.value }}
+          ESTI_AWS_ACCESS_KEY_ID: ${{ secrets.ESTI_AWS_ACCESS_KEY_ID }}
+          ESTI_AWS_SECRET_ACCESS_KEY: ${{ secrets.ESTI_AWS_SECRET_ACCESS_KEY }}
+          ESTI_VERSION: ${{ needs.deploy-image.outputs.tag }}
+
+      - name: Check files in S3 bucket
+        run: |
+          FILES_COUNT=`aws s3 ls s3://esti-system-testing/${{ github.run_number }}/${{ steps.unique.outputs.value }} --recursive | wc -l`
+          [ $FILES_COUNT -gt 5 ]
+
+      - name: lakeFS Logs on s3 failure
+        if: ${{ failure() }}
+        continue-on-error: true
+        run: docker compose -f esti/ops/docker-compose.yaml logs --tail=1000 lakefs
+
+      - name: Export DB
+        if: ${{ always() }}
+        working-directory: esti/ops
+        run: |
+          if docker compose ps -q postgres; then
+            docker compose exec -T postgres pg_dumpall --username=lakefs | gzip | aws s3 cp - s3://esti-system-testing/${{ github.run_number }}/${{ steps.unique.outputs.value }}/dump.gz
+          fi

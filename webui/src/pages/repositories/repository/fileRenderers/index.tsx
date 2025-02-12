@@ -116,7 +116,6 @@ export function guessType(
   }
   switch (fileExtension) {
     case "parquet":
-    case "geoparquet":
     case "csv":
     case "tsv":
       return FileType.DATA;
@@ -138,6 +137,8 @@ export function guessType(
     case "yaml":
     case "yml":
     case "json":
+    case "jsonl":
+    case "ndjson":
       return FileType.TEXT;
   }
   if (guessLanguage(fileExtension, contentType)) return FileType.TEXT;

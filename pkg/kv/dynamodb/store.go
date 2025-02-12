@@ -45,7 +45,7 @@ type EntriesIterator struct {
 	store        *Store
 	queryResult  *dynamodb.QueryOutput
 	currEntryIdx int
-	limit        int64
+	limit        int
 }
 
 type DynKVItem struct {
@@ -380,19 +380,22 @@ func (s *Store) Scan(ctx context.Context, partitionKey []byte, options kv.ScanOp
 		return nil, kv.ErrMissingPartitionKey
 	}
 	// limit set to the minimum 'params.ScanLimit' and 'options.BatchSize', unless 0 (not set)
-	limit := s.params.ScanLimit
+	firstScanLimit := s.params.ScanLimit
 	batchSize := int64(options.BatchSize)
-	if batchSize != 0 && limit != 0 && batchSize < limit {
-		limit = batchSize
+	if batchSize != 0 && firstScanLimit != 0 && batchSize < firstScanLimit {
+		firstScanLimit = batchSize
 	}
 	it := &EntriesIterator{
 		partitionKey: partitionKey,
 		startKey:     options.KeyStart,
 		scanCtx:      ctx,
 		store:        s,
-		limit:        limit,
+		limit:        int(firstScanLimit),
 	}
-	it.runQuery()
+
+	// Setting the limit just for the first scan to avoid issues like
+	// https://github.com/treeverse/lakeFS/issues/7864
+	it.runQuery(it.limit)
 	if it.err != nil {
 		err := it.err
 		if s.isSlowDownErr(it.err) {
@@ -427,7 +430,7 @@ func (e *EntriesIterator) SeekGE(key []byte) {
 	if !e.isInRange(key) {
 		e.startKey = key
 		e.exclusiveStartKey = nil
-		e.runQuery()
+		e.runQuery(e.limit)
 		return
 	}
 	var item DynKVItem
@@ -453,7 +456,8 @@ func (e *EntriesIterator) Next() bool {
 			return false
 		}
 		e.exclusiveStartKey = e.queryResult.LastEvaluatedKey
-		e.runQuery()
+		e.doubleAndCapLimit()
+		e.runQuery(e.limit)
 		if e.err != nil {
 			return false
 		}
@@ -471,6 +475,17 @@ func (e *EntriesIterator) Next() bool {
 	return true
 }
 
+// doubleAndCapLimit doubles the limit up to the maximum allowed by the store
+// this is done to avoid:
+// 1. limit being too small and causing multiple queries on one side
+// 2. limit being too large and causing a single query consuming too much capacity
+func (e *EntriesIterator) doubleAndCapLimit() {
+	e.limit *= 2
+	if e.limit > int(e.store.params.ScanLimit) {
+		e.limit = int(e.store.params.ScanLimit)
+	}
+}
+
 func (e *EntriesIterator) Entry() *kv.Entry {
 	return e.entry
 }
@@ -483,7 +498,7 @@ func (e *EntriesIterator) Close() {
 	e.err = kv.ErrClosedEntries
 }
 
-func (e *EntriesIterator) runQuery() {
+func (e *EntriesIterator) runQuery(limit int) {
 	expressionAttributeValues := map[string]types.AttributeValue{
 		":partitionkey": &types.AttributeValueMemberB{
 			Value: e.partitionKey,
@@ -505,10 +520,15 @@ func (e *EntriesIterator) runQuery() {
 		ExclusiveStartKey:         e.exclusiveStartKey,
 		ReturnConsumedCapacity:    types.ReturnConsumedCapacityTotal,
 	}
-	if e.limit != 0 {
-		queryInput.Limit = aws.Int32(int32(e.limit))
-	}
 
+	queryInput.Limit = aws.Int32(int32(limit)) //nolint:gosec
+	e.store.logger.
+		WithField("partition_key", e.partitionKey).
+		WithField("limit", limit).
+		WithField("exclusive_start_key", e.exclusiveStartKey).
+		WithField("start_key", e.startKey).
+		WithContext(e.scanCtx).
+		Trace("Performing DynamoDB query")
 	queryResult, err := e.store.svc.Query(e.scanCtx, queryInput)
 	const operation = "Query"
 	if err != nil {

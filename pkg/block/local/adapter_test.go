@@ -9,10 +9,12 @@ import (
 	"github.com/treeverse/lakefs/pkg/block"
 	"github.com/treeverse/lakefs/pkg/block/blocktest"
 	"github.com/treeverse/lakefs/pkg/block/local"
+	"github.com/treeverse/lakefs/pkg/config"
 )
 
 const testStorageNamespace = "local://test"
 
+// TestLocalAdapter tests the Local Storage Adapter for basic storage functionality
 func TestLocalAdapter(t *testing.T) {
 	tmpDir := t.TempDir()
 	localPath := path.Join(tmpDir, "lakefs")
@@ -21,15 +23,16 @@ func TestLocalAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal("Failed to create new adapter", err)
 	}
-	blocktest.AdapterTest(t, adapter, testStorageNamespace, externalPath)
+	blocktest.AdapterTest(t, adapter, testStorageNamespace, externalPath, false)
 }
 
+// TestAdapterNamespace tests the namespace validity regex with various paths
 func TestAdapterNamespace(t *testing.T) {
 	tmpDir := t.TempDir()
 	localPath := path.Join(tmpDir, "lakefs")
 	adapter, err := local.NewAdapter(localPath, local.WithRemoveEmptyDir(false))
 	require.NoError(t, err, "create new adapter")
-	expr, err := regexp.Compile(adapter.GetStorageNamespaceInfo().ValidityRegex)
+	expr, err := regexp.Compile(adapter.GetStorageNamespaceInfo(config.SingleBlockstoreID).ValidityRegex)
 	require.NoError(t, err)
 
 	tests := []struct {

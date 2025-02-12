@@ -4,15 +4,6 @@ import (
 	"time"
 )
 
-// AdapterConfig configures a block adapter.
-type AdapterConfig interface {
-	BlockstoreType() string
-	BlockstoreLocalParams() (Local, error)
-	BlockstoreS3Params() (S3, error)
-	BlockstoreGSParams() (GS, error)
-	BlockstoreAzureParams() (Azure, error)
-}
-
 type Mem struct{}
 
 type Local struct {
@@ -54,6 +45,7 @@ type S3 struct {
 	ServerSideEncryption          string
 	ServerSideEncryptionKmsKeyID  string
 	PreSignedExpiry               time.Duration
+	PreSignedEndpoint             string
 	DisablePreSigned              bool
 	DisablePreSignedUI            bool
 	DisablePreSignedMultipart     bool
@@ -63,11 +55,13 @@ type S3 struct {
 }
 
 type GS struct {
-	CredentialsFile    string
-	CredentialsJSON    string
-	PreSignedExpiry    time.Duration
-	DisablePreSigned   bool
-	DisablePreSignedUI bool
+	CredentialsFile                      string
+	CredentialsJSON                      string
+	PreSignedExpiry                      time.Duration
+	DisablePreSigned                     bool
+	DisablePreSignedUI                   bool
+	ServerSideEncryptionCustomerSupplied []byte
+	ServerSideEncryptionKmsKeyID         string
 }
 
 type Azure struct {

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/treeverse/lakefs/pkg/api/apigen"
 	"github.com/treeverse/lakefs/pkg/fileutil"
+	"github.com/treeverse/lakefs/pkg/git"
 	"github.com/treeverse/lakefs/pkg/local"
 	"github.com/treeverse/lakefs/pkg/uri"
 	"golang.org/x/sync/errgroup"
@@ -45,7 +46,8 @@ const localSummaryTemplate = `
 
 var (
 	localDefaultArgsRange = cobra.RangeArgs(localDefaultMinArgs, localDefaultMaxArgs)
-	ErrUnknownOperation   = errors.New("unknown operation")
+
+	ErrUnknownOperation = errors.New("unknown operation")
 )
 
 func withGitIgnoreFlag(cmd *cobra.Command) {
@@ -60,12 +62,18 @@ func withForceFlag(cmd *cobra.Command, usage string) {
 func localDiff(ctx context.Context, client apigen.ClientWithResponsesInterface, remote *uri.URI, path string) local.Changes {
 	fmt.Printf("\ndiff 'local://%s' <--> '%s'...\n", path, remote)
 	currentRemoteState := make(chan apigen.ObjectStats, maxDiffPageSize)
+	includePOSIXPermissions := cfg.Experimental.Local.POSIXPerm.Enabled
 	var wg errgroup.Group
 	wg.Go(func() error {
-		return local.ListRemote(ctx, client, remote, currentRemoteState)
+		return local.ListRemote(ctx, client, remote, currentRemoteState, includePOSIXPermissions)
 	})
 
-	changes, err := local.DiffLocalWithHead(currentRemoteState, path)
+	changes, err := local.DiffLocalWithHead(currentRemoteState, path, local.Config{
+		SkipNonRegularFiles: cfg.Local.SkipNonRegularFiles,
+		IncludePerm:         cfg.Experimental.Local.POSIXPerm.Enabled,
+		IncludeUID:          cfg.Experimental.Local.POSIXPerm.IncludeUID,
+		IncludeGID:          cfg.Experimental.Local.POSIXPerm.IncludeGID,
+	})
 	if err != nil {
 		DieErr(err)
 	}
@@ -131,6 +139,16 @@ func warnOnCaseInsensitiveDirectory(path string) {
 var localCmd = &cobra.Command{
 	Use:   "local",
 	Short: "Sync local directories with lakeFS paths",
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		preRunCmd(cmd)
+
+		_, localPath := getSyncArgs(args, false, false)
+		cmdSuffix := ""
+		if git.IsRepository(localPath) {
+			cmdSuffix = "git"
+		}
+		sendStats(cmd, cmdSuffix)
+	},
 }
 
 //nolint:gochecknoinits

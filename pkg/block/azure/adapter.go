@@ -139,6 +139,7 @@ func ResolveBlobURLInfoFromURL(pathURL *url.URL) (BlobURLInfo, error) {
 
 func resolveBlobURLInfo(obj block.ObjectPointer) (BlobURLInfo, error) {
 	key := obj.Identifier
+	// we're in the context of a specific storage here, so there's no need for StorageID.
 	defaultNamespace := obj.StorageNamespace
 	var qk BlobURLInfo
 	// check if the key is fully qualified
@@ -194,20 +195,23 @@ func (a *Adapter) log(ctx context.Context) logging.Logger {
 	return logging.FromContext(ctx)
 }
 
-func (a *Adapter) Put(ctx context.Context, obj block.ObjectPointer, sizeBytes int64, reader io.Reader, opts block.PutOpts) error {
+func (a *Adapter) Put(ctx context.Context, obj block.ObjectPointer, sizeBytes int64, reader io.Reader, opts block.PutOpts) (*block.PutResponse, error) {
 	var err error
 	defer reportMetrics("Put", time.Now(), &sizeBytes, &err)
 	qualifiedKey, err := resolveBlobURLInfo(obj)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	o := a.translatePutOpts(ctx, opts)
 	containerClient, err := a.clientCache.NewContainerClient(qualifiedKey.StorageAccountName, qualifiedKey.ContainerName)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = containerClient.NewBlockBlobClient(qualifiedKey.BlobURL).UploadStream(ctx, reader, &o)
-	return err
+	res, err := containerClient.NewBlockBlobClient(qualifiedKey.BlobURL).UploadStream(ctx, reader, &o)
+	if err != nil {
+		return nil, err
+	}
+	return &block.PutResponse{ModTime: res.LastModified}, nil
 }
 
 func (a *Adapter) Get(ctx context.Context, obj block.ObjectPointer) (io.ReadCloser, error) {
@@ -217,12 +221,12 @@ func (a *Adapter) Get(ctx context.Context, obj block.ObjectPointer) (io.ReadClos
 	return a.Download(ctx, obj, 0, blockblob.CountToEnd)
 }
 
-func (a *Adapter) GetWalker(uri *url.URL) (block.Walker, error) {
-	if err := block.ValidateStorageType(uri, block.StorageTypeAzure); err != nil {
+func (a *Adapter) GetWalker(_ string, opts block.WalkerOptions) (block.Walker, error) {
+	if err := block.ValidateStorageType(opts.StorageURI, block.StorageTypeAzure); err != nil {
 		return nil, err
 	}
 
-	storageAccount, domain, err := ParseURL(uri)
+	storageAccount, domain, err := ParseURL(opts.StorageURI)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +239,7 @@ func (a *Adapter) GetWalker(uri *url.URL) (block.Walker, error) {
 		return nil, err
 	}
 
-	return NewAzureDataLakeWalker(client, false)
+	return NewAzureDataLakeWalker(client, opts.SkipOutOfOrder)
 }
 
 func (a *Adapter) GetPreSignedURL(ctx context.Context, obj block.ObjectPointer, mode block.PreSignMode) (string, time.Time, error) {
@@ -583,6 +587,10 @@ func (a *Adapter) BlockstoreType() string {
 	return block.BlockstoreTypeAzure
 }
 
+func (a *Adapter) BlockstoreMetadata(_ context.Context) (*block.BlockstoreMetadata, error) {
+	return nil, block.ErrOperationNotSupported
+}
+
 func (a *Adapter) CompleteMultiPartUpload(ctx context.Context, obj block.ObjectPointer, _ string, multipartList *block.MultipartUploadCompletion) (*block.CompleteMultiPartUploadResponse, error) {
 	var err error
 	defer reportMetrics("CompleteMultiPartUpload", time.Now(), nil, &err)
@@ -598,7 +606,7 @@ func (a *Adapter) CompleteMultiPartUpload(ctx context.Context, obj block.ObjectP
 	return completeMultipart(ctx, multipartList.Part, *containerURL, qualifiedKey.BlobURL)
 }
 
-func (a *Adapter) GetStorageNamespaceInfo() block.StorageNamespaceInfo {
+func (a *Adapter) GetStorageNamespaceInfo(string) *block.StorageNamespaceInfo {
 	info := block.DefaultStorageNamespaceInfo(block.BlockstoreTypeAzure)
 
 	info.ImportValidityRegex = fmt.Sprintf(`^https?://[a-z0-9_-]+\.%s`, a.clientCache.params.Domain)
@@ -611,11 +619,15 @@ func (a *Adapter) GetStorageNamespaceInfo() block.StorageNamespaceInfo {
 	if !(a.disablePreSignedUI || a.disablePreSigned) {
 		info.PreSignSupportUI = true
 	}
-	return info
+	return &info
 }
 
-func (a *Adapter) ResolveNamespace(storageNamespace, key string, identifierType block.IdentifierType) (block.QualifiedKey, error) {
+func (a *Adapter) ResolveNamespace(_, storageNamespace, key string, identifierType block.IdentifierType) (block.QualifiedKey, error) {
 	return block.DefaultResolveNamespace(storageNamespace, key, identifierType)
+}
+
+func (a *Adapter) GetRegion(_ context.Context, _, _ string) (string, error) {
+	return "", block.ErrOperationNotSupported
 }
 
 func (a *Adapter) RuntimeStats() map[string]string {
@@ -631,6 +643,9 @@ func (a *Adapter) GetPresignUploadPartURL(_ context.Context, _ block.ObjectPoint
 }
 
 func (a *Adapter) ListParts(_ context.Context, _ block.ObjectPointer, _ string, _ block.ListPartsOpts) (*block.ListPartsResponse, error) {
+	return nil, block.ErrOperationNotSupported
+}
+func (a *Adapter) ListMultipartUploads(_ context.Context, _ block.ObjectPointer, _ block.ListMultipartUploadsOpts) (*block.ListMultipartUploadsResponse, error) {
 	return nil, block.ErrOperationNotSupported
 }
 

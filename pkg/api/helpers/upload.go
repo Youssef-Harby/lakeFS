@@ -124,10 +124,10 @@ type presignUpload struct {
 	numParts    int
 }
 
-func NewPreSignUploader(client apigen.ClientWithResponsesInterface, multipartSupport bool) *PreSignUploader {
+func NewPreSignUploader(client apigen.ClientWithResponsesInterface, httpClient *http.Client, multipartSupport bool) *PreSignUploader {
 	return &PreSignUploader{
 		Concurrency:      DefaultUploadConcurrency,
-		HTTPClient:       http.DefaultClient,
+		HTTPClient:       httpClient,
 		Client:           client,
 		MultipartSupport: multipartSupport,
 	}
@@ -191,7 +191,6 @@ func (u *presignUpload) uploadMultipart(ctx context.Context) (*apigen.ObjectStat
 	g.SetLimit(u.uploader.Concurrency)
 
 	for i := 0; i < u.numParts; i++ {
-		i := i // pinning
 		g.Go(func() error {
 			etag, err := u.uploadPart(grpCtx, parts[i].Reader, parts[i].URL)
 			if err != nil {
@@ -389,7 +388,7 @@ func (u *presignUpload) uploadObject(ctx context.Context) (*apigen.ObjectStats, 
 	if linkResp.JSON409 != nil {
 		return nil, ErrConflict
 	}
-	return nil, fmt.Errorf("link object to backing store: %w (%s)", ErrRequestFailed, linkResp.Status())
+	return nil, fmt.Errorf("link object to backing store: %w (%s)", ResponseAsError(linkResp), linkResp.Status())
 }
 
 func (u *presignUpload) Upload(ctx context.Context) (*apigen.ObjectStats, error) {
@@ -403,9 +402,9 @@ func (u *presignUpload) Upload(ctx context.Context) (*apigen.ObjectStats, error)
 	return u.uploadObject(ctx)
 }
 
-func ClientUploadPreSign(ctx context.Context, client apigen.ClientWithResponsesInterface, repoID, branchID, objPath string, metadata map[string]string, contentType string, contents io.ReadSeeker, presignMultipartSupport bool) (*apigen.ObjectStats, error) {
+func ClientUploadPreSign(ctx context.Context, client apigen.ClientWithResponsesInterface, httpClient *http.Client, repoID, branchID, objPath string, metadata map[string]string, contentType string, contents io.ReadSeeker, presignMultipartSupport bool) (*apigen.ObjectStats, error) {
 	// upload loop, retry on conflict
-	uploader := NewPreSignUploader(client, presignMultipartSupport)
+	uploader := NewPreSignUploader(client, httpClient, presignMultipartSupport)
 	for {
 		stats, err := uploader.Upload(ctx, repoID, branchID, objPath, contents, contentType, metadata)
 		if err == nil {

@@ -15,7 +15,6 @@ const (
 	branchesPrefix         = "branches"
 	commitsPrefix          = "commits"
 	settingsPrefix         = "settings"
-	addressesPrefix        = "link-addresses"
 	importsPrefix          = "imports"
 	repoMetadataPrefix     = "repo-metadata"
 )
@@ -69,10 +68,6 @@ func SettingsPath(key string) string {
 	return kv.FormatPath(settingsPrefix, key)
 }
 
-func LinkedAddressPath(key string) string {
-	return kv.FormatPath(addressesPrefix, key)
-}
-
 func ImportsPath(key string) string {
 	return kv.FormatPath(importsPrefix, key)
 }
@@ -123,6 +118,7 @@ func RepoFromProto(pb *RepositoryData) *RepositoryRecord {
 	return &RepositoryRecord{
 		RepositoryID: RepositoryID(pb.Id),
 		Repository: &Repository{
+			StorageID:        StorageID(pb.StorageId),
 			StorageNamespace: StorageNamespace(pb.StorageNamespace),
 			DefaultBranchID:  BranchID(pb.DefaultBranchId),
 			CreationDate:     pb.CreationDate.AsTime(),
@@ -136,6 +132,7 @@ func RepoFromProto(pb *RepositoryData) *RepositoryRecord {
 func ProtoFromRepo(repo *RepositoryRecord) *RepositoryData {
 	return &RepositoryData{
 		Id:               repo.RepositoryID.String(),
+		StorageId:        repo.Repository.StorageID.String(),
 		StorageNamespace: repo.Repository.StorageNamespace.String(),
 		DefaultBranchId:  repo.Repository.DefaultBranchID.String(),
 		CreationDate:     timestamppb.New(repo.Repository.CreationDate),
@@ -220,4 +217,44 @@ func ProtoFromRepositoryMetadata(metadata RepositoryMetadata) *RepoMetadata {
 	return &RepoMetadata{
 		Metadata: metadata,
 	}
+}
+
+func PullRequestFromProto(pb *PullRequestData) *PullRequestRecord {
+	pr := &PullRequestRecord{
+		ID: PullRequestID(pb.Id),
+		PullRequest: PullRequest{
+			CreationDate:   pb.CreatedAt.AsTime(),
+			Status:         pb.Status,
+			Title:          pb.Title,
+			Author:         pb.Author,
+			Description:    pb.Description,
+			Source:         pb.SourceBranch,
+			Destination:    pb.DestinationBranch,
+			MergedCommitID: pb.CommitId,
+		},
+	}
+	if pb.ClosedAt != nil {
+		pbTime := pb.ClosedAt.AsTime()
+		pr.ClosedDate = &pbTime
+	}
+	return pr
+}
+
+func ProtoFromPullRequest(pullID PullRequestID, pull *PullRequest) *PullRequestData {
+	prData := &PullRequestData{
+		Id:                pullID.String(),
+		Status:            pull.Status,
+		CreatedAt:         timestamppb.New(pull.CreationDate),
+		Title:             pull.Title,
+		Author:            pull.Author,
+		Description:       pull.Description,
+		SourceBranch:      pull.Source,
+		DestinationBranch: pull.Destination,
+		CommitId:          pull.MergedCommitID,
+	}
+	if pull.ClosedDate != nil {
+		prData.ClosedAt = timestamppb.New(*pull.ClosedDate)
+	}
+
+	return prData
 }

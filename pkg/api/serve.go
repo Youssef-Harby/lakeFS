@@ -28,31 +28,31 @@ import (
 )
 
 const (
-	RequestIDHeaderName = "X-Request-ID"
-	LoggerServiceName   = "rest_api"
+	LoggerServiceName = "rest_api"
 
 	extensionValidationExcludeBody = "x-validation-exclude-body"
 )
 
-func Serve(cfg *config.Config, catalog *catalog.Catalog, middlewareAuthenticator auth.Authenticator, authService auth.Service, authenticationService authentication.Service, blockAdapter block.Adapter, metadataManager auth.MetadataManager, migrator Migrator, collector stats.Collector, cloudMetadataProvider cloud.MetadataProvider, actions actionsHandler, auditChecker AuditChecker, logger logging.Logger, gatewayDomains []string, snippets []params.CodeSnippet, pathProvider upload.PathProvider, usageReporter stats.UsageReporterOperations) http.Handler {
+func Serve(cfg config.Config, catalog *catalog.Catalog, middlewareAuthenticator auth.Authenticator, authService auth.Service, authenticationService authentication.Service, blockAdapter block.Adapter, metadataManager auth.MetadataManager, migrator Migrator, collector stats.Collector, cloudMetadataProvider cloud.MetadataProvider, actions actionsHandler, auditChecker AuditChecker, logger logging.Logger, gatewayDomains []string, snippets []params.CodeSnippet, pathProvider upload.PathProvider, usageReporter stats.UsageReporterOperations) http.Handler {
 	logger.Info("initialize OpenAPI server")
 	swagger, err := apigen.GetSwagger()
 	if err != nil {
 		panic(err)
 	}
 	sessionStore := sessions.NewCookieStore(authService.SecretStore().SharedSecret())
-	oidcConfig := OIDCConfig(cfg.Auth.OIDC)
-	cookieAuthConfig := CookieAuthConfig(cfg.Auth.CookieAuthVerification)
+	oidcConfig := OIDCConfig(cfg.GetBaseConfig().Auth.OIDC)
+	cookieAuthConfig := CookieAuthConfig(cfg.GetBaseConfig().Auth.CookieAuthVerification)
 	r := chi.NewRouter()
 	apiRouter := r.With(
 		OapiRequestValidatorWithOptions(swagger, &openapi3filter.Options{
 			AuthenticationFunc: openapi3filter.NoopAuthenticationFunc,
 		}),
 		httputil.LoggingMiddleware(
-			RequestIDHeaderName,
+			httputil.RequestIDHeaderName,
 			logging.Fields{logging.ServiceNameFieldKey: LoggerServiceName},
-			cfg.Logging.AuditLogLevel,
-			cfg.Logging.TraceRequestHeaders),
+			cfg.GetBaseConfig().Logging.AuditLogLevel,
+			cfg.GetBaseConfig().Logging.TraceRequestHeaders,
+			cfg.GetBaseConfig().IsAdvancedAuth()),
 		AuthMiddleware(logger, swagger, middlewareAuthenticator, authService, sessionStore, &oidcConfig, &cookieAuthConfig),
 		MetricsMiddleware(swagger),
 	)
@@ -64,12 +64,12 @@ func Serve(cfg *config.Config, catalog *catalog.Catalog, middlewareAuthenticator
 	r.Mount("/_pprof/", httputil.ServePPROF("/_pprof/"))
 	r.Mount("/openapi.json", http.HandlerFunc(swaggerSpecHandler))
 	r.Mount(apiutil.BaseURL, http.HandlerFunc(InvalidAPIEndpointHandler))
-	r.Mount("/logout", NewLogoutHandler(sessionStore, logger, cfg.Auth.LogoutRedirectURL))
+	r.Mount("/logout", NewLogoutHandler(sessionStore, logger, cfg.GetBaseConfig().Auth.LogoutRedirectURL))
 
 	// Configuration flag to control if the embedded UI is served
 	// or not and assign the correct handler for each case.
 	var rootHandler http.Handler
-	if cfg.UI.Enabled {
+	if cfg.GetBaseConfig().UI.Enabled {
 		// Handler which serves the embedded UI
 		// as well as handles erroneous S3 gateway requests
 		// and returns a compatible response

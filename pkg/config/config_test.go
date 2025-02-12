@@ -12,7 +12,9 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/go-test/deep"
 	"github.com/spf13/viper"
-	"github.com/treeverse/lakefs/pkg/block/factory"
+	blockfactory "github.com/treeverse/lakefs/modules/block/factory"
+	configfactory "github.com/treeverse/lakefs/modules/config/factory"
+	"github.com/treeverse/lakefs/pkg/block"
 	"github.com/treeverse/lakefs/pkg/block/gs"
 	"github.com/treeverse/lakefs/pkg/block/local"
 	"github.com/treeverse/lakefs/pkg/config"
@@ -21,27 +23,28 @@ import (
 	"github.com/treeverse/lakefs/pkg/testutil"
 )
 
-func newConfigFromFile(fn string) (*config.Config, error) {
+func newConfigFromFile(fn string) (*config.BaseConfig, error) {
 	viper.SetConfigFile(fn)
 	err := viper.ReadInConfig()
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := config.NewConfig("")
+	cfg, err := configfactory.BuildConfig("")
 	if err != nil {
 		return nil, err
 	}
 	err = cfg.Validate()
-	return cfg, err
+	return cfg.GetBaseConfig(), err
 }
 
 func TestConfig_Setup(t *testing.T) {
 	// test defaults
-	c, err := config.NewConfig("")
+	cfg := &config.BaseConfig{}
+	cfg, err := config.NewConfig("", cfg)
 	testutil.Must(t, err)
 	// Don't validate, some tested configs don't have all required fields.
-	if c.ListenAddress != config.DefaultListenAddress {
-		t.Fatalf("expected listen addr '%s', got '%s'", config.DefaultListenAddress, c.ListenAddress)
+	if cfg.ListenAddress != config.DefaultListenAddress {
+		t.Fatalf("expected listen addr '%s', got '%s'", config.DefaultListenAddress, cfg.ListenAddress)
 	}
 }
 
@@ -92,7 +95,7 @@ func TestConfig_EnvironmentVariables(t *testing.T) {
 
 	c, err := newConfigFromFile("testdata/valid_config.yaml")
 	testutil.Must(t, err)
-	kvParams, err := kvparams.NewConfig(c)
+	kvParams, err := kvparams.NewConfig(&c.Database)
 	testutil.Must(t, err)
 	if kvParams.Postgres.ConnectionString != dbString {
 		t.Errorf("got DB connection string %s, expected to override to %s", kvParams.Postgres.ConnectionString, dbString)
@@ -111,10 +114,14 @@ func TestConfig_BuildBlockAdapter(t *testing.T) {
 	t.Run("local block adapter", func(t *testing.T) {
 		c, err := newConfigFromFile("testdata/valid_config.yaml")
 		testutil.Must(t, err)
-		adapter, err := factory.BuildBlockAdapter(ctx, nil, c)
+		adapter, err := blockfactory.BuildBlockAdapter(ctx, nil, c)
 		testutil.Must(t, err)
-		if _, ok := adapter.(*local.Adapter); !ok {
-			t.Fatalf("expected a local block adapter, got something else instead")
+		metricsAdapter, ok := adapter.(*block.MetricsAdapter)
+		if !ok {
+			t.Fatalf("got a %T when expecting a MetricsAdapter", adapter)
+		}
+		if _, ok := metricsAdapter.InnerAdapter().(*local.Adapter); !ok {
+			t.Fatalf("got %T expected a local block adapter", metricsAdapter.InnerAdapter())
 		}
 	})
 
@@ -122,7 +129,7 @@ func TestConfig_BuildBlockAdapter(t *testing.T) {
 		c, err := newConfigFromFile("testdata/valid_s3_adapter_config.yaml")
 		testutil.Must(t, err)
 
-		_, err = factory.BuildBlockAdapter(ctx, nil, c)
+		_, err = blockfactory.BuildBlockAdapter(ctx, nil, c)
 		var errProfileNotExists awsconfig.SharedConfigProfileNotExistError
 		if !errors.As(err, &errProfileNotExists) {
 			t.Fatalf("expected a config.SharedConfigProfileNotExistError, got '%v'", err)
@@ -132,9 +139,14 @@ func TestConfig_BuildBlockAdapter(t *testing.T) {
 	t.Run("gs block adapter", func(t *testing.T) {
 		c, err := newConfigFromFile("testdata/valid_gs_adapter_config.yaml")
 		testutil.Must(t, err)
-		adapter, err := factory.BuildBlockAdapter(ctx, nil, c)
+		adapter, err := blockfactory.BuildBlockAdapter(ctx, nil, c)
 		testutil.Must(t, err)
-		if _, ok := adapter.(*gs.Adapter); !ok {
+
+		metricsAdapter, ok := adapter.(*block.MetricsAdapter)
+		if !ok {
+			t.Fatalf("expected a metrics block adapter, got something else instead")
+		}
+		if _, ok := metricsAdapter.InnerAdapter().(*gs.Adapter); !ok {
 			t.Fatalf("expected an gs block adapter, got something else instead")
 		}
 	})

@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +65,7 @@ var (
 	formatterInitOnce sync.Once
 	defaultLogger     = logrus.New()
 	openLoggers       []io.Closer
+	syslogOnce        sync.Once
 )
 
 func Level() string {
@@ -146,6 +148,19 @@ func SetOutputs(outputs []string, fileMaxSizeMB, filesKeep int) error {
 		defaultLogger.SetOutput(io.MultiWriter(writers...))
 	}
 	return nil
+}
+
+func HasLogFileOutput(outputs []string) bool {
+	return slices.ContainsFunc(outputs, func(e string) bool {
+		return e != "" && e != "-" && e != "="
+	})
+}
+
+func GetLogFileOutputPath(outputs []string) string {
+	outFileIdx := slices.IndexFunc(outputs, func(e string) bool {
+		return e != "" && e != "-" && e != "="
+	})
+	return outputs[outFileIdx]
 }
 
 type OutputFormatOptions struct {

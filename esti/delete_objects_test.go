@@ -35,8 +35,8 @@ func TestDeleteObjects(t *testing.T) {
 		Prefix: aws.String(mainBranch + "/"),
 	})
 
-	assert.NoError(t, err)
-	assert.Len(t, listOut.Contents, numOfObjects)
+	require.NoError(t, err)
+	require.Len(t, listOut.Contents, numOfObjects)
 
 	deleteOut, err := svc.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket: aws.String(repo),
@@ -87,7 +87,8 @@ func TestDeleteObjects_Viewer(t *testing.T) {
 	key := resCreateCreds.JSON201.AccessKeyId
 	secret := resCreateCreds.JSON201.SecretAccessKey
 	s3Endpoint := viper.GetString("s3_endpoint")
-	s3Client, err := testutil.SetupTestS3Client(s3Endpoint, key, secret)
+	forcePathStyle := viper.GetBool("force_path_style")
+	s3Client, err := testutil.SetupTestS3Client(s3Endpoint, key, secret, forcePathStyle)
 	require.NoError(t, err)
 
 	// delete objects using viewer

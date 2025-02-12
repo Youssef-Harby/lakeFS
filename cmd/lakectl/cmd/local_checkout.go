@@ -57,7 +57,13 @@ func localCheckout(cmd *cobra.Command, localPath string, specifiedRef string, co
 	currentBase := remote.WithRef(idx.AtHead)
 	diffs := local.Undo(localDiff(cmd.Context(), client, currentBase, idx.LocalPath()))
 	sigCtx := localHandleSyncInterrupt(cmd.Context(), idx, string(checkoutOperation))
-	syncMgr := local.NewSyncManager(sigCtx, client, syncFlags)
+	syncMgr := local.NewSyncManager(sigCtx, client, getHTTPClient(), local.Config{
+		SyncFlags:           syncFlags,
+		SkipNonRegularFiles: cfg.Local.SkipNonRegularFiles,
+		IncludePerm:         cfg.Experimental.Local.POSIXPerm.Enabled,
+		IncludeUID:          cfg.Experimental.Local.POSIXPerm.IncludeUID,
+		IncludeGID:          cfg.Experimental.Local.POSIXPerm.IncludeGID,
+	})
 	// confirm on local changes
 	if confirmByFlag && len(diffs) > 0 {
 		fmt.Println("Uncommitted changes exist, the operation will revert all changes on local directory.")
@@ -78,7 +84,7 @@ func localCheckout(cmd *cobra.Command, localPath string, specifiedRef string, co
 			newBase := newRemote.WithRef(newHead)
 
 			// write new index
-			_, err = local.WriteIndex(idx.LocalPath(), remote, newHead, "")
+			_, err = local.WriteIndex(idx.LocalPath(), newRemote, newHead, "")
 			if err != nil {
 				DieErr(err)
 			}

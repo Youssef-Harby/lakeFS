@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/treeverse/lakefs/pkg/auth"
-	"github.com/treeverse/lakefs/pkg/auth/acl"
 	"github.com/treeverse/lakefs/pkg/auth/model"
 	"github.com/treeverse/lakefs/pkg/config"
 	"github.com/treeverse/lakefs/pkg/logging"
@@ -68,12 +67,18 @@ func CreateRBACBasePolicies(ctx context.Context, authService auth.Service, ts ti
 						"ci:*",
 						"retention:*",
 						"branches:*",
+						"pr:*",
 						"fs:ReadConfig",
 					},
 					Resource: permissions.All,
 					Effect:   model.StatementEffectAllow,
 				},
 			},
+		},
+		{
+			CreatedAt:   ts,
+			DisplayName: "PRReadWriteAll",
+			Statement:   auth.MakeStatementForPolicyTypeOrDie("PRReadWrite", all),
 		},
 		{
 			CreatedAt:   ts,
@@ -138,7 +143,7 @@ func CreateRBACBaseGroups(ctx context.Context, authService auth.Service, ts time
 	if err != nil {
 		return err
 	}
-	err = attachPolicies(ctx, authService, "Developers", []string{"FSReadWriteAll", "AuthManageOwnCredentials", "RepoManagementReadAll"})
+	err = attachPolicies(ctx, authService, "Developers", []string{"FSReadWriteAll", "PRReadWriteAll", "AuthManageOwnCredentials", "RepoManagementReadAll"})
 	if err != nil {
 		return err
 	}
@@ -150,40 +155,8 @@ func CreateRBACBaseGroups(ctx context.Context, authService auth.Service, ts time
 	return nil
 }
 
-func CreateACLBaseGroups(ctx context.Context, authService auth.Service, ts time.Time) error {
-	if _, err := authService.CreateGroup(ctx, &model.Group{CreatedAt: ts, DisplayName: acl.AdminsGroup}); err != nil {
-		return fmt.Errorf("setup: create base ACL group %s: %w", acl.AdminsGroup, err)
-	}
-	if err := acl.WriteGroupACL(ctx, authService, acl.AdminsGroup, model.ACL{Permission: acl.AdminPermission}, ts, false); err != nil {
-		return fmt.Errorf("setup: %w", err)
-	}
-
-	if _, err := authService.CreateGroup(ctx, &model.Group{CreatedAt: ts, DisplayName: acl.SupersGroup}); err != nil {
-		return fmt.Errorf("setup: create base ACL group %s: %w", acl.SupersGroup, err)
-	}
-	if err := acl.WriteGroupACL(ctx, authService, acl.SupersGroup, model.ACL{Permission: acl.SuperPermission}, ts, false); err != nil {
-		return fmt.Errorf("setup: %w", err)
-	}
-
-	if _, err := authService.CreateGroup(ctx, &model.Group{CreatedAt: ts, DisplayName: acl.WritersGroup}); err != nil {
-		return fmt.Errorf("setup: create base ACL group %s: %w", acl.WritersGroup, err)
-	}
-	if err := acl.WriteGroupACL(ctx, authService, acl.WritersGroup, model.ACL{Permission: acl.WritePermission}, ts, false); err != nil {
-		return fmt.Errorf("setup: %w", err)
-	}
-
-	if _, err := authService.CreateGroup(ctx, &model.Group{CreatedAt: ts, DisplayName: acl.ReadersGroup}); err != nil {
-		return fmt.Errorf("create base ACL group %s: %w", acl.ReadersGroup, err)
-	}
-	if err := acl.WriteGroupACL(ctx, authService, acl.ReadersGroup, model.ACL{Permission: acl.ReadPermission}, ts, false); err != nil {
-		return fmt.Errorf("setup: %w", err)
-	}
-
-	return nil
-}
-
 // CreateAdminUser setup base groups, policies and create admin user
-func CreateAdminUser(ctx context.Context, authService auth.Service, cfg *config.Config, superuser *model.SuperuserConfiguration) (*model.Credential, error) {
+func CreateAdminUser(ctx context.Context, authService auth.Service, cfg *config.BaseConfig, superuser *model.SuperuserConfiguration) (*model.Credential, error) {
 	// Set up the basic groups and policies
 	now := time.Now()
 	err := CreateBaseGroups(ctx, authService, cfg, now)
@@ -191,25 +164,38 @@ func CreateAdminUser(ctx context.Context, authService auth.Service, cfg *config.
 		return nil, err
 	}
 
-	return AddAdminUser(ctx, authService, superuser)
+	return AddAdminUser(ctx, authService, superuser, true)
 }
 
-func AddAdminUser(ctx context.Context, authService auth.Service, user *model.SuperuserConfiguration) (*model.Credential, error) {
-	// verify the admin group exists
-	_, err := authService.GetGroup(ctx, AdminsGroup)
-	if err != nil {
-		return nil, fmt.Errorf("admin group - %w", err)
-	}
-
+func AddAdminUser(ctx context.Context, authService auth.Service, user *model.SuperuserConfiguration, addToAdmins bool) (*model.Credential, error) {
 	// create admin user
 	user.Source = "internal"
-	_, err = authService.CreateUser(ctx, &user.User)
+	_, err := authService.CreateUser(ctx, &user.User)
 	if err != nil {
 		return nil, fmt.Errorf("create user - %w", err)
 	}
-	err = authService.AddUserToGroup(ctx, user.Username, AdminsGroup)
-	if err != nil {
-		return nil, fmt.Errorf("add user to group - %w", err)
+	defer func() {
+		// delete admin on any error to avoid partial setup
+		if err != nil {
+			logger := logging.ContextUnavailable()
+			logger.WithError(err).Warn("Failed to create admin user, deleting user")
+			if delUserErr := authService.DeleteUser(ctx, user.Username); delUserErr != nil {
+				logger.WithError(delUserErr).Error("Failed to delete user")
+			}
+		}
+	}()
+
+	if addToAdmins {
+		// verify the admin group exists
+		_, err = authService.GetGroup(ctx, AdminsGroup)
+		if err != nil {
+			return nil, fmt.Errorf("admin group - %w", err)
+		}
+
+		err = authService.AddUserToGroup(ctx, user.Username, AdminsGroup)
+		if err != nil {
+			return nil, fmt.Errorf("add user to group - %w", err)
+		}
 	}
 
 	var creds *model.Credential
@@ -228,11 +214,11 @@ func AddAdminUser(ctx context.Context, authService auth.Service, user *model.Sup
 	return creds, nil
 }
 
-func CreateInitialAdminUser(ctx context.Context, authService auth.Service, cfg *config.Config, metadataManger auth.MetadataManager, username string) (*model.Credential, error) {
+func CreateInitialAdminUser(ctx context.Context, authService auth.Service, cfg *config.BaseConfig, metadataManger auth.MetadataManager, username string) (*model.Credential, error) {
 	return CreateInitialAdminUserWithKeys(ctx, authService, cfg, metadataManger, username, nil, nil)
 }
 
-func CreateInitialAdminUserWithKeys(ctx context.Context, authService auth.Service, cfg *config.Config, metadataManger auth.MetadataManager, username string, accessKeyID *string, secretAccessKey *string) (*model.Credential, error) {
+func CreateInitialAdminUserWithKeys(ctx context.Context, authService auth.Service, cfg *config.BaseConfig, metadataManager auth.MetadataManager, username string, accessKeyID *string, secretAccessKey *string) (*model.Credential, error) {
 	adminUser := &model.SuperuserConfiguration{
 		User: model.User{
 			CreatedAt: time.Now(),
@@ -245,21 +231,29 @@ func CreateInitialAdminUserWithKeys(ctx context.Context, authService auth.Servic
 	}
 
 	// create first admin user
-	cred, err := CreateAdminUser(ctx, authService, cfg, adminUser)
-	if err != nil {
+	var (
+		cred *model.Credential
+		err  error
+	)
+	if cfg.IsAuthBasic() {
+		if cred, err = AddAdminUser(ctx, authService, adminUser, false); err != nil {
+			return nil, err
+		}
+	} else if cred, err = CreateAdminUser(ctx, authService, cfg, adminUser); err != nil {
 		return nil, err
 	}
 
-	// update setup timestamp
-	if err := metadataManger.UpdateSetupTimestamp(ctx, time.Now()); err != nil {
-		logging.ContextUnavailable().WithError(err).Error("Failed the update setup timestamp")
+	// update setup time with auth type used
+	if err = metadataManager.UpdateSetupTimestamp(ctx, time.Now(), cfg.Auth.UIConfig.RBAC); err != nil {
+		logging.FromContext(ctx).WithError(err).Error("Failed the update setup timestamp")
 	}
+
 	return cred, err
 }
 
-func CreateBaseGroups(ctx context.Context, authService auth.Service, cfg *config.Config, ts time.Time) error {
-	if cfg.IsAuthUISimplified() {
-		return CreateACLBaseGroups(ctx, authService, ts)
+func CreateBaseGroups(ctx context.Context, authService auth.Service, cfg *config.BaseConfig, ts time.Time) error {
+	if !cfg.IsAdvancedAuth() {
+		return nil
 	}
 	return CreateRBACBaseGroups(ctx, authService, ts)
 }

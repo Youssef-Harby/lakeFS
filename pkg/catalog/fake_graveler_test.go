@@ -14,7 +14,6 @@ type FakeGraveler struct {
 	KeyValue                   map[string]*graveler.Value
 	Err                        error
 	ListIteratorFactory        func() graveler.ValueIterator
-	ListStagingIteratorFactory func(token graveler.StagingToken) graveler.ValueIterator
 	DiffIteratorFactory        func() graveler.DiffIterator
 	RepositoryIteratorFactory  func() graveler.RepositoryIterator
 	BranchIteratorFactory      func() graveler.BranchIterator
@@ -52,7 +51,7 @@ func (g *FakeGraveler) SetGarbageCollectionRules(_ context.Context, _ *graveler.
 	panic("implement me")
 }
 
-func (g *FakeGraveler) CreateBareRepository(_ context.Context, _ graveler.RepositoryID, _ graveler.StorageNamespace, _ graveler.BranchID, _ bool) (*graveler.RepositoryRecord, error) {
+func (g *FakeGraveler) CreateBareRepository(_ context.Context, _ graveler.RepositoryID, _ graveler.StorageID, _ graveler.StorageNamespace, _ graveler.BranchID, _ bool) (*graveler.RepositoryRecord, error) {
 	panic("implement me")
 }
 
@@ -117,19 +116,25 @@ func (g *FakeGraveler) Set(_ context.Context, repository *graveler.RepositoryRec
 	return nil
 }
 
+func (g *FakeGraveler) Update(ctx context.Context, repository *graveler.RepositoryRecord, branchID graveler.BranchID, key graveler.Key, update graveler.ValueUpdateFunc, opts ...graveler.SetOptionsFunc) error {
+	if g.Err != nil {
+		return g.Err
+	}
+	k := fakeGravelerBuildKey(repository.RepositoryID, graveler.Ref(branchID.String()), key)
+	value, err := update(g.KeyValue[k])
+	if err != nil {
+		return err
+	}
+	g.KeyValue[k] = value
+	return nil
+}
+
 func (g *FakeGraveler) Delete(ctx context.Context, repository *graveler.RepositoryRecord, branchID graveler.BranchID, key graveler.Key, _ ...graveler.SetOptionsFunc) error {
 	return nil
 }
 
 func (g *FakeGraveler) DeleteBatch(ctx context.Context, repository *graveler.RepositoryRecord, branchID graveler.BranchID, keys []graveler.Key, _ ...graveler.SetOptionsFunc) error {
 	return nil
-}
-
-func (g *FakeGraveler) ListStaging(_ context.Context, b *graveler.Branch, _ int) (graveler.ValueIterator, error) {
-	if g.Err != nil {
-		return nil, g.Err
-	}
-	return g.ListStagingIteratorFactory(b.StagingToken), nil
 }
 
 func (g *FakeGraveler) List(_ context.Context, _ *graveler.RepositoryRecord, _ graveler.Ref, _ int) (graveler.ValueIterator, error) {
@@ -143,7 +148,7 @@ func (g *FakeGraveler) GetRepository(ctx context.Context, repositoryID graveler.
 	return &graveler.RepositoryRecord{RepositoryID: repositoryID}, nil
 }
 
-func (g *FakeGraveler) CreateRepository(ctx context.Context, repositoryID graveler.RepositoryID, storageNamespace graveler.StorageNamespace, branchID graveler.BranchID, readOnly bool) (*graveler.RepositoryRecord, error) {
+func (g *FakeGraveler) CreateRepository(ctx context.Context, repositoryID graveler.RepositoryID, storageID graveler.StorageID, storageNamespace graveler.StorageNamespace, branchID graveler.BranchID, readOnly bool) (*graveler.RepositoryRecord, error) {
 	panic("implement me")
 }
 
@@ -209,7 +214,7 @@ func (g *FakeGraveler) Log(ctx context.Context, repository *graveler.RepositoryR
 	panic("implement me")
 }
 
-func (g *FakeGraveler) ListBranches(_ context.Context, _ *graveler.RepositoryRecord) (graveler.BranchIterator, error) {
+func (g *FakeGraveler) ListBranches(ctx context.Context, repository *graveler.RepositoryRecord, opts ...graveler.ListOptionsFunc) (graveler.BranchIterator, error) {
 	if g.Err != nil {
 		return nil, g.Err
 	}
@@ -256,7 +261,7 @@ func (g *FakeGraveler) ResetPrefix(ctx context.Context, repository *graveler.Rep
 	panic("implement me")
 }
 
-func (g *FakeGraveler) Revert(_ context.Context, _ *graveler.RepositoryRecord, _ graveler.BranchID, _ graveler.Ref, _ int, _ graveler.CommitParams, _ ...graveler.SetOptionsFunc) (graveler.CommitID, error) {
+func (g *FakeGraveler) Revert(_ context.Context, _ *graveler.RepositoryRecord, _ graveler.BranchID, _ graveler.Ref, _ int, _ graveler.CommitParams, _ *graveler.CommitOverrides, _ ...graveler.SetOptionsFunc) (graveler.CommitID, error) {
 	panic("implement me")
 }
 
@@ -306,6 +311,23 @@ func (g *FakeGraveler) WriteMetaRangeByIterator(_ context.Context, _ *graveler.R
 }
 
 func (g *FakeGraveler) GetStagingToken(_ context.Context, _ *graveler.RepositoryRecord, _ graveler.BranchID) (*graveler.StagingToken, error) {
+	panic("implement me")
+}
+
+func (g *FakeGraveler) GetPullRequest(context.Context, *graveler.RepositoryRecord, graveler.PullRequestID) (*graveler.PullRequest, error) {
+	panic("implement me")
+}
+
+func (g *FakeGraveler) CreatePullRequest(context.Context, *graveler.RepositoryRecord, *graveler.PullRequestRecord) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (g *FakeGraveler) ListPullRequests(context.Context, *graveler.RepositoryRecord) (graveler.PullsIterator, error) {
+	panic("implement me")
+}
+
+func (g *FakeGraveler) UpdatePullRequest(context.Context, *graveler.RepositoryRecord, graveler.PullRequestID, *graveler.UpdatePullRequest) error {
 	panic("implement me")
 }
 

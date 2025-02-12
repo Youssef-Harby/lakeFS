@@ -55,6 +55,22 @@ export const defaultAPIHeaders = {
     "X-Lakefs-Client": "lakefs-webui/__buildVersion",
 };
 
+export const parseRawHeaders = (rawHeaders) => {
+    const headersString = typeof rawHeaders === 'string' ? rawHeaders : rawHeaders.toString();
+    const cleanedHeadersString = headersString.trim();
+    const headerLines = cleanedHeadersString.split('\n');
+    const parsedHeaders = headerLines.reduce((acc, line) => {
+        let [key, ...value] = line.split(':'); // split into key and the rest of the value
+        key = key.trim();
+        value = value.join(':').trim();
+        if (key && value) {
+            acc[key.toLowerCase()] = value;
+        }
+        return acc;
+    }, {});
+    return parsedHeaders;
+};
+
 const authenticationError = "error authenticating request"
 
 const apiRequest = async (uri, requestData = {}, additionalHeaders = {}) => {
@@ -71,7 +87,7 @@ const apiRequest = async (uri, requestData = {}, additionalHeaders = {}) => {
             cache.delete('user');
             throw new AuthenticationError('Authentication Error', response.status);
         }
-        throw new AuthorizationError(errorMessage, response.status);
+        throw new AuthorizationError(errorMessage || 'Unauthorized', response.status);
     }
 
     return response;
@@ -284,10 +300,21 @@ class Auth {
         }
     }
 
-    async createGroup(groupName) {
-        const response = await apiRequest(`/auth/groups`, {method: 'POST', body: JSON.stringify({id: groupName})});
+    async createGroup(groupName, groupDescription) {
+        const response = await apiRequest(`/auth/groups`, {method: 'POST', body: JSON.stringify({
+                id: groupName,
+                description: groupDescription
+        })});
         if (response.status !== 201) {
             throw new Error(await extractError(response));
+        }
+        return response.json();
+    }
+
+    async getGroup(groupId) {
+        const response = await apiRequest(`/auth/groups/${encodeURIComponent(groupId)}`);
+        if (response.status !== 200) {
+            throw new Error(`could not get groups: ${await extractError(response)}`);
         }
         return response.json();
     }
@@ -442,8 +469,8 @@ class Repositories {
         return response.json();
     }
 
-    async list(prefix = "", after = "", amount = DEFAULT_LISTING_AMOUNT) {
-        const query = qs({prefix, after, amount});
+    async list(search = "", after = "", amount = DEFAULT_LISTING_AMOUNT) {
+        const query = qs({search, after, amount});
         const response = await apiRequest(`/repositories?${query}`);
         if (response.status !== 200) {
             throw new Error(`could not list repositories: ${await extractError(response)}`);
@@ -567,6 +594,95 @@ class Tags {
 
 }
 
+class Pulls {
+    async get(repoId, pullId) {
+        const response = await apiRequest(`/repositories/${encodeURIComponent(repoId)}/pulls/${encodeURIComponent(pullId)}`);
+        if (response.status === 404) {
+            throw new NotFoundError(`Could not find pull request (id = ${pullId}).`);
+        } else if (response.status !== 200) {
+            throw new Error(`Could not get pull request (id = ${pullId}): ${await extractError(response)}`);
+        }
+        return response.json();
+    }
+
+    async list(repoId, status = "open", prefix = "", after = "", amount = DEFAULT_LISTING_AMOUNT) {
+        const query = qs({status, prefix, after, amount});
+        const response = await apiRequest(`/repositories/${encodeURIComponent(repoId)}/pulls?` + query);
+        if (response.status !== 200) {
+            const baseMessage = 'Could not list pull requests';
+            switch (response.status) {
+                case 400:
+                case 401:
+                case 404:
+                    throw new Error(`${baseMessage}: ${(await response.json()).message}`);
+                default:
+                    throw new Error(`${baseMessage} (status = ${response.status}).`);
+            }
+        }
+        return response.json();
+    }
+
+    async create(repoId, pullDetails) {
+        const response = await apiRequest(`/repositories/${encodeURIComponent(repoId)}/pulls`, {
+            method: 'POST',
+            body: JSON.stringify(pullDetails),
+        });
+        if (response.status !== 201) {
+            const baseMessage = 'Could not create pull request';
+            switch (response.status) {
+                case 400:
+                case 401:
+                case 403:
+                case 404:
+                case 409:
+                    throw new Error(`${baseMessage}: ${(await response.json()).message}`);
+                default:
+                    throw new Error(`${baseMessage} (status = ${response.status}).`);
+            }
+        }
+        return response.json()
+    }
+
+    async merge(repoId, pullId) {
+        const response = await apiRequest(`/repositories/${encodeURIComponent(repoId)}/pulls/${encodeURIComponent(pullId)}/merge`, {
+            method: 'PUT',
+        });
+        if (response.status !== 200) {
+            const baseMessage = 'Could not merge pull request';
+            switch (response.status) {
+                case 400:
+                case 401:
+                case 403:
+                case 404:
+                case 409:
+                case 412:
+                    throw new Error(`${baseMessage}: ${(await response.json()).message}`);
+                default:
+                    throw new Error(`${baseMessage} (status = ${response.status}).`);
+            }
+        }
+    }
+
+    async update(repoId, pullId, pullDetails) {
+        const response = await apiRequest(`/repositories/${encodeURIComponent(repoId)}/pulls/${encodeURIComponent(pullId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(pullDetails),
+        });
+        if (response.status !== 204) {
+            const baseMessage = 'Could not update pull request';
+            switch (response.status) {
+                case 400:
+                case 401:
+                case 403:
+                case 404:
+                    throw new Error(`${baseMessage}: ${(await response.json()).message}`);
+                default:
+                    throw new Error(`${baseMessage} (status = ${response.status}).`);
+            }
+        }
+    }
+}
+
 // uploadWithProgress uses good ol' XMLHttpRequest because progress indication in fetch() is
 //  still not well supported across browsers (see https://stackoverflow.com/questions/35711724/upload-progress-indicators-for-fetch).
 export const uploadWithProgress = (url, file, method = 'POST', onProgress = null, additionalHeaders = null) => {
@@ -578,15 +694,18 @@ export const uploadWithProgress = (url, file, method = 'POST', onProgress = null
             }
         });
         xhr.addEventListener('load', () => {
-          resolve({
-              status: xhr.status,
-              body: xhr.responseText,
-              contentType: xhr.getResponseHeader('Content-Type'),
-              etag: xhr.getResponseHeader('ETag'),
-              contentMD5: xhr.getResponseHeader('Content-MD5'),
-          })
+            resolve({
+                status: xhr.status,
+                body: xhr.responseText,
+                rawHeaders: xhr.getAllResponseHeaders(), // add raw headers 
+            });
         });
-        xhr.addEventListener('error', () => reject(new Error('Upload Failed')));
+        xhr.addEventListener('error', () => reject({
+            message: 'Upload Failed',
+            status: xhr.status,
+            body: xhr.responseText,
+            rawHeaders: xhr.getAllResponseHeaders(),
+        }));
         xhr.addEventListener('abort', () => reject(new Error('Upload Aborted')));
         xhr.open(method, url, true);
         xhr.setRequestHeader('Accept', 'application/json');
@@ -627,7 +746,7 @@ class Objects {
             next: async () => {
                 const query = qs({prefix, presign, after, amount: MAX_LISTING_AMOUNT});
                 const response = await apiRequest(
-                  `/repositories/${encodeURIComponent(repoId)}/refs/${encodeURIComponent(ref)}/objects/ls?` + query);
+                    `/repositories/${encodeURIComponent(repoId)}/refs/${encodeURIComponent(ref)}/objects/ls?` + query);
                 if (response.status === 404) {
                     throw new NotFoundError(response.message ?? "ref not found");
                 }
@@ -637,7 +756,7 @@ class Objects {
                 const responseBody = await response.json();
                 const done = !responseBody.pagination.has_more;
                 if (!done) after = responseBody.pagination.next_offset;
-                return {page:responseBody.results, done}
+                return {page: responseBody.results, done}
             },
         }
     }
@@ -652,7 +771,7 @@ class Objects {
         if (response.status === 401) {
             return false;
         }
-        
+
         // This is not one of the expected responses
         throw new Error(await extractError(response));
     }
@@ -660,8 +779,9 @@ class Objects {
     async upload(repoId, branchId, path, fileObject, onProgressFn = null) {
         const query = qs({path});
         const uploadUrl = `${API_ENDPOINT}/repositories/${encodeURIComponent(repoId)}/branches/${encodeURIComponent(branchId)}/objects?` + query;
-        const {status, body, contentType} = await uploadWithProgress(uploadUrl, fileObject, 'POST', onProgressFn)
+        const {status, body, rawHeaders} = await uploadWithProgress(uploadUrl, fileObject, 'POST', onProgressFn)
         if (status !== 201) {
+            const contentType = rawHeaders ? parseRawHeaders(rawHeaders)['content-type'] : undefined;
             if (contentType === "application/json" && body) {
                 const responseData = JSON.parse(body)
                 throw new Error(responseData.message)
@@ -951,16 +1071,26 @@ class Config {
         const response = await apiRequest('/config', {
             method: 'GET',
         });
+
+        const parseBlockstoreConfig = (storageCfg) => {
+            storageCfg.warnings = []
+            if (storageCfg.blockstore_type === 'mem') {
+                storageCfg.warnings.push(`Block adapter ${storageCfg.blockstore_type} not usable in production`)
+            }
+            return storageCfg;
+        };
+
         let cfg, storageCfg;
         switch (response.status) {
             case 200:
                 cfg = await response.json();
-                storageCfg = cfg.storage_config
-                storageCfg.warnings = []
-                if (storageCfg.blockstore_type === 'mem') {
-                    storageCfg.warnings.push(`Block adapter ${storageCfg.blockstore_type} not usable in production`)
+                storageCfg = cfg['storage_config']
+                if (storageCfg) {
+                    return parseBlockstoreConfig(storageCfg);
+                } else {
+                    const storageCfgList = cfg['storage_config_list'];
+                    return storageCfgList.map(storageCfg => parseBlockstoreConfig(storageCfg));
                 }
-                return storageCfg;
             case 409:
                 throw new Error('Conflict');
             default:
@@ -975,7 +1105,7 @@ class Config {
         let cfg;
         switch (response.status) {
             case 200:
-                cfg =  await response.json();
+                cfg = await response.json();
                 return cfg.version_config
             default:
                 throw new Error('Unknown');
@@ -1050,7 +1180,12 @@ class Staging {
         const query = qs({path});
         const response = await apiRequest(`/repositories/${encodeURIComponent(repoId)}/branches/${encodeURIComponent(branchId)}/staging/backing?` + query, {
             method: 'PUT',
-            body: JSON.stringify({staging: staging, checksum: checksum, size_bytes: sizeBytes, content_type: contentType})
+            body: JSON.stringify({
+                staging: staging,
+                checksum: checksum,
+                size_bytes: sizeBytes,
+                content_type: contentType
+            })
         });
         if (response.status !== 200) {
             throw new Error(await extractError(response));
@@ -1079,7 +1214,7 @@ class Import {
                     "path": source,
                     "destination": prepend,
                     "type": "common_prefix",
-            }],
+                }],
             "commit": {
                 "message": commitMessage
             },
@@ -1112,6 +1247,7 @@ class Import {
 export const repositories = new Repositories();
 export const branches = new Branches();
 export const tags = new Tags();
+export const pulls = new Pulls();
 export const objects = new Objects();
 export const commits = new Commits();
 export const refs = new Refs();

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/treeverse/lakefs/pkg/block"
+	"github.com/treeverse/lakefs/pkg/config"
 )
 
 var (
@@ -75,23 +75,27 @@ func getKey(obj block.ObjectPointer) string {
 	if obj.IdentifierType == block.IdentifierTypeFull {
 		return obj.Identifier
 	}
-	return fmt.Sprintf("%s:%s", obj.StorageNamespace, obj.Identifier)
+	if obj.StorageID == config.SingleBlockstoreID {
+		return fmt.Sprintf("%s:%s", obj.StorageNamespace, obj.Identifier)
+	} else {
+		return fmt.Sprintf("%s:%s:%s", obj.StorageID, obj.StorageNamespace, obj.Identifier)
+	}
 }
 
-func (a *Adapter) Put(_ context.Context, obj block.ObjectPointer, _ int64, reader io.Reader, opts block.PutOpts) error {
+func (a *Adapter) Put(_ context.Context, obj block.ObjectPointer, _ int64, reader io.Reader, opts block.PutOpts) (*block.PutResponse, error) {
 	if err := verifyObjectPointer(obj); err != nil {
-		return err
+		return nil, err
 	}
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	key := getKey(obj)
 	a.data[key] = data
 	a.properties[key] = block.Properties(opts)
-	return nil
+	return &block.PutResponse{}, nil
 }
 
 func (a *Adapter) Get(_ context.Context, obj block.ObjectPointer) (io.ReadCloser, error) {
@@ -120,7 +124,7 @@ func verifyObjectPointer(obj block.ObjectPointer) error {
 	return nil
 }
 
-func (a *Adapter) GetWalker(_ *url.URL) (block.Walker, error) {
+func (a *Adapter) GetWalker(_ string, _ block.WalkerOptions) (block.Walker, error) {
 	return nil, fmt.Errorf("mem block adapter: %w", block.ErrOperationNotSupported)
 }
 
@@ -339,15 +343,23 @@ func (a *Adapter) BlockstoreType() string {
 	return block.BlockstoreTypeMem
 }
 
-func (a *Adapter) GetStorageNamespaceInfo() block.StorageNamespaceInfo {
+func (a *Adapter) BlockstoreMetadata(_ context.Context) (*block.BlockstoreMetadata, error) {
+	return nil, block.ErrOperationNotSupported
+}
+
+func (a *Adapter) GetStorageNamespaceInfo(string) *block.StorageNamespaceInfo {
 	info := block.DefaultStorageNamespaceInfo(block.BlockstoreTypeMem)
 	info.PreSignSupport = false
 	info.ImportSupport = false
-	return info
+	return &info
 }
 
-func (a *Adapter) ResolveNamespace(storageNamespace, key string, identifierType block.IdentifierType) (block.QualifiedKey, error) {
+func (a *Adapter) ResolveNamespace(_, storageNamespace, key string, identifierType block.IdentifierType) (block.QualifiedKey, error) {
 	return block.DefaultResolveNamespace(storageNamespace, key, identifierType)
+}
+
+func (a *Adapter) GetRegion(_ context.Context, _, _ string) (string, error) {
+	return "", block.ErrOperationNotSupported
 }
 
 func (a *Adapter) RuntimeStats() map[string]string {
@@ -359,5 +371,8 @@ func (a *Adapter) GetPresignUploadPartURL(_ context.Context, _ block.ObjectPoint
 }
 
 func (a *Adapter) ListParts(_ context.Context, _ block.ObjectPointer, _ string, _ block.ListPartsOpts) (*block.ListPartsResponse, error) {
+	return nil, block.ErrOperationNotSupported
+}
+func (a *Adapter) ListMultipartUploads(_ context.Context, _ block.ObjectPointer, _ block.ListMultipartUploadsOpts) (*block.ListMultipartUploadsResponse, error) {
 	return nil, block.ErrOperationNotSupported
 }

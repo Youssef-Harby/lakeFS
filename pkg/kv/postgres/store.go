@@ -34,9 +34,9 @@ type EntriesIterator struct {
 	includeStart bool
 	store        *Store
 	entries      []kv.Entry
-	limit        int
 	currEntryIdx int
 	err          error
+	limit        int
 }
 
 const (
@@ -318,20 +318,20 @@ func (s *Store) Scan(ctx context.Context, partitionKey []byte, options kv.ScanOp
 		return nil, kv.ErrMissingPartitionKey
 	}
 
-	// limit based on the minimum between ScanPageSize and ScanOptions batch size
-	limit := s.Params.ScanPageSize
+	// firstScanLimit based on the minimum between ScanPageSize and ScanOptions batch size
+	firstScanLimit := s.Params.ScanPageSize
 	if options.BatchSize != 0 && s.Params.ScanPageSize != 0 && options.BatchSize < s.Params.ScanPageSize {
-		limit = options.BatchSize
+		firstScanLimit = options.BatchSize
 	}
 	it := &EntriesIterator{
 		ctx:          ctx,
 		partitionKey: partitionKey,
 		startKey:     options.KeyStart,
+		limit:        firstScanLimit,
 		store:        s,
-		limit:        limit,
 		includeStart: true,
 	}
-	it.runQuery()
+	it.runQuery(it.limit)
 	if it.err != nil {
 		return nil, it.err
 	}
@@ -355,7 +355,8 @@ func (e *EntriesIterator) Next() bool {
 		key := e.entries[e.currEntryIdx].Key
 		e.startKey = key
 		e.includeStart = false
-		e.runQuery()
+		e.doubleAndCapLimit()
+		e.runQuery(e.limit)
 		if e.err != nil || len(e.entries) == 0 {
 			return false
 		}
@@ -364,11 +365,23 @@ func (e *EntriesIterator) Next() bool {
 	return true
 }
 
+// DoubleAndCapLimit doubles the limit up to the maximum allowed by the store
+// this is to avoid
+// 1. limit being too small and causing multiple queries on one sid
+// 2. limit being too large and causing a single query to be too slow
+func (e *EntriesIterator) doubleAndCapLimit() {
+	e.limit *= 2
+	if e.limit > e.store.Params.ScanPageSize {
+		e.limit = e.store.Params.ScanPageSize
+	}
+}
+
 func (e *EntriesIterator) SeekGE(key []byte) {
 	if !e.isInRange(key) {
 		e.startKey = key
 		e.includeStart = true
-		e.runQuery()
+		e.doubleAndCapLimit()
+		e.runQuery(e.limit)
 		return
 	}
 	for i := range e.entries {
@@ -397,19 +410,19 @@ func (e *EntriesIterator) Close() {
 	e.err = kv.ErrClosedEntries
 }
 
-func (e *EntriesIterator) runQuery() {
+func (e *EntriesIterator) runQuery(scanLimit int) {
 	var (
 		rows pgx.Rows
 		err  error
 	)
 	if e.startKey == nil {
-		rows, err = e.store.Pool.Query(e.ctx, `SELECT partition_key,key,value FROM `+e.store.Params.SanitizedTableName+` WHERE partition_key=$1 ORDER BY key LIMIT $2`, e.partitionKey, e.limit)
+		rows, err = e.store.Pool.Query(e.ctx, `SELECT partition_key,key,value FROM `+e.store.Params.SanitizedTableName+` WHERE partition_key=$1 ORDER BY key LIMIT $2`, e.partitionKey, scanLimit)
 	} else {
 		compareOp := ">="
 		if !e.includeStart {
 			compareOp = ">"
 		}
-		rows, err = e.store.Pool.Query(e.ctx, `SELECT partition_key,key,value FROM `+e.store.Params.SanitizedTableName+` WHERE partition_key=$1 AND key `+compareOp+` $2 ORDER BY key LIMIT $3`, e.partitionKey, e.startKey, e.limit)
+		rows, err = e.store.Pool.Query(e.ctx, `SELECT partition_key,key,value FROM `+e.store.Params.SanitizedTableName+` WHERE partition_key=$1 AND key `+compareOp+` $2 ORDER BY key LIMIT $3`, e.partitionKey, e.startKey, scanLimit)
 	}
 	if err != nil {
 		e.err = fmt.Errorf("postgres scan: %w", err)

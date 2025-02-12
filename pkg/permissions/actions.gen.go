@@ -16,7 +16,6 @@ var Actions = []string{
 	"fs:DeleteObject",
 	"fs:ListObjects",
 	"fs:CreateCommit",
-	"fs:CreateMetaRange",
 	"fs:ReadCommit",
 	"fs:ListCommits",
 	"fs:CreateBranch",
@@ -60,4 +59,7 @@ var Actions = []string{
 	"retention:PrepareGarbageCollectionUncommitted",
 	"branches:GetBranchProtectionRules",
 	"branches:SetBranchProtectionRules",
+	"pr:ReadPullRequest",
+	"pr:WritePullRequest",
+	"pr:ListPullRequests",
 }

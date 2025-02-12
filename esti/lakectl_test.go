@@ -10,9 +10,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/treeverse/lakefs/pkg/api/apigen"
+	"github.com/treeverse/lakefs/pkg/graveler"
 )
 
 var emptyVars = make(map[string]string)
+
+const branchProtectTimeout = graveler.BranchUpdateMaxInterval + time.Second
 
 func TestLakectlHelp(t *testing.T) {
 	RunCmdAndVerifySuccessWithFile(t, Lakectl(), false, "lakectl_help", emptyVars)
@@ -98,6 +101,29 @@ func TestLakectlBasicRepoActions(t *testing.T) {
 
 	// Trying to delete again
 	RunCmdAndVerifyFailureWithFile(t, Lakectl()+" repo delete lakefs://"+repoName2+" -y", false, "lakectl_repo_delete_not_found", vars)
+
+	// Create repository with sample data
+	repoName3 := generateUniqueRepositoryName()
+	storage3 := generateUniqueStorageNamespace(repoName3)
+	vars = map[string]string{
+		"REPO":    repoName3,
+		"STORAGE": storage3,
+		"BRANCH":  mainBranch,
+	}
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" repo create lakefs://"+repoName3+" "+storage3+" --sample-data", false, "lakectl_repo_create_sample", vars)
+}
+
+func TestLakectlRepoCreateWithStorageID(t *testing.T) {
+	// Validate the --storage-id flag (currently only allowed to be empty)
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	vars := map[string]string{
+		"REPO":    repoName,
+		"STORAGE": storage,
+		"BRANCH":  mainBranch,
+	}
+	RunCmdAndVerifyFailureWithFile(t, Lakectl()+" repo create lakefs://"+repoName+" "+storage+" --storage-id storage1", false, "lakectl_repo_create_with_storage_id", vars)
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" repo create lakefs://"+repoName+" "+storage+" --storage-id \"\"", false, "lakectl_repo_create", vars)
 }
 
 func TestLakectlPreSignUpload(t *testing.T) {
@@ -112,8 +138,13 @@ func TestLakectlPreSignUpload(t *testing.T) {
 	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" log lakefs://"+repoName+"/"+mainBranch, false, "lakectl_log_initial", vars)
 
 	filePath := "ro_1k.1"
-	vars["FILE_PATH"] = filePath
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k lakefs://"+repoName+"/"+mainBranch+"/"+filePath+" --pre-sign", false, "lakectl_fs_upload", vars)
+	t.Run("upload from file", func(t *testing.T) {
+		vars["FILE_PATH"] = filePath
+		RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k lakefs://"+repoName+"/"+mainBranch+"/"+filePath+" --pre-sign", false, "lakectl_fs_upload", vars)
+	})
+	t.Run("upload from stdin", func(t *testing.T) {
+		RunCmdAndVerifySuccessWithFile(t, "cat files/ro_1k | "+Lakectl()+" fs upload -s - lakefs://"+repoName+"/"+mainBranch+"/"+filePath+" --pre-sign", false, "lakectl_fs_upload", vars)
+	})
 }
 
 func TestLakectlCommit(t *testing.T) {
@@ -219,31 +250,69 @@ func TestLakectlMerge(t *testing.T) {
 	commitMessage := "first commit to main"
 	vars["MESSAGE"] = commitMessage
 	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" commit lakefs://"+repoName+"/"+mainBranch+" -m \""+commitMessage+"\"", false, "lakectl_commit", vars)
+
+	// create new feature branch
 	featureBranch := "feature"
-	branchVars := map[string]string{
+	featureBranchVars := map[string]string{
 		"REPO":          repoName,
 		"STORAGE":       storage,
 		"SOURCE_BRANCH": mainBranch,
 		"DEST_BRANCH":   featureBranch,
 	}
 
-	t.Run("merge with commit message and meta", func(t *testing.T) {
-		// create new branch 'feature'
-		RunCmdAndVerifySuccessWithFile(t, Lakectl()+" branch create lakefs://"+repoName+"/"+featureBranch+" --source lakefs://"+repoName+"/"+mainBranch, false, "lakectl_branch_create", branchVars)
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" branch create lakefs://"+repoName+"/"+featureBranch+" --source lakefs://"+repoName+"/"+mainBranch, false, "lakectl_branch_create", featureBranchVars)
 
-		// update 'file1' on 'main' and commit
-		RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k_other lakefs://"+repoName+"/"+mainBranch+"/"+filePath1, false, "lakectl_fs_upload", vars)
-		commitMessage = "file update on main branch"
-		vars["MESSAGE"] = commitMessage
-		RunCmdAndVerifySuccessWithFile(t, Lakectl()+" commit lakefs://"+repoName+"/"+mainBranch+" -m \""+commitMessage+"\"", false, "lakectl_commit", vars)
+	// update 'file1' on feature branch and commit
+	vars["FILE_PATH"] = filePath1
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k_other lakefs://"+repoName+"/"+featureBranch+"/"+filePath1, false, "lakectl_fs_upload", vars)
+	commitMessage = "file update on feature branch"
+	vars["BRANCH"] = featureBranch
+	vars["MESSAGE"] = commitMessage
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" commit lakefs://"+repoName+"/"+featureBranch+" -m \""+commitMessage+"\"", false, "lakectl_commit", vars)
 
-		commitMessage = "merge commit"
-		vars["MESSAGE"] = commitMessage
-		meta := "key1=value1,key2=value2"
-		RunCmdAndVerifySuccessWithFile(t, Lakectl()+" merge lakefs://"+repoName+"/"+mainBranch+" lakefs://"+repoName+"/"+featureBranch+" -m '"+commitMessage+"' --meta "+meta, false, "lakectl_merge_success", branchVars)
+	// update 'file2' on 'main' and commit
+	vars["FILE_PATH"] = filePath2
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k_other lakefs://"+repoName+"/"+featureBranch+"/"+filePath2, false, "lakectl_fs_upload", vars)
+	commitMessage = "another file update on main branch"
+	vars["MESSAGE"] = commitMessage
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" commit lakefs://"+repoName+"/"+featureBranch+" -m \""+commitMessage+"\"", false, "lakectl_commit", vars)
 
-		RunCmdAndVerifySuccessWithFile(t, Lakectl()+" log --amount 1 lakefs://"+repoName+"/"+featureBranch, false, "lakectl_merge_with_commit", vars)
-	})
+	cases := []struct {
+		Name   string
+		Squash bool
+	}{
+		{Name: "regular", Squash: false},
+		{Name: "squash", Squash: true},
+	}
+	for _, tc := range cases {
+		t.Run("merge with commit message and meta "+tc.Name, func(t *testing.T) {
+			destBranch := "dest-" + tc.Name
+			destBranchVars := map[string]string{
+				"REPO":          repoName,
+				"STORAGE":       storage,
+				"SOURCE_BRANCH": mainBranch,
+				"DEST_BRANCH":   destBranch,
+			}
+			// create new destBranch from main, before the additions to main.
+			RunCmdAndVerifySuccessWithFile(t, Lakectl()+" branch create lakefs://"+repoName+"/"+destBranch+" --source lakefs://"+repoName+"/"+mainBranch, false, "lakectl_branch_create", destBranchVars)
+
+			commitMessage = "merge commit"
+			vars["MESSAGE"] = commitMessage
+			meta := "key1=value1,key2=value2"
+			squash := ""
+			if tc.Squash {
+				squash = "--squash"
+			}
+			destBranchVars["SOURCE_BRANCH"] = featureBranch
+			RunCmdAndVerifySuccessWithFile(t, Lakectl()+" merge lakefs://"+repoName+"/"+featureBranch+" lakefs://"+repoName+"/"+destBranch+" -m '"+commitMessage+"' --meta "+meta+" "+squash, false, "lakectl_merge_success", destBranchVars)
+
+			golden := "lakectl_merge_with_commit"
+			if tc.Squash {
+				golden = "lakectl_merge_with_squashed_commit"
+			}
+			RunCmdAndVerifySuccessWithFile(t, Lakectl()+" log --amount 1 lakefs://"+repoName+"/"+destBranch, false, golden, vars)
+		})
+	}
 }
 
 func TestLakectlMergeAndStrategies(t *testing.T) {
@@ -333,6 +402,108 @@ func TestLakectlMergeAndStrategies(t *testing.T) {
 	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs ls lakefs://"+repoName+"/"+featureBranch+"/", false, "lakectl_fs_ls_1_file", vars)
 }
 
+func TestLakectlLogNoMergesWithCommitsAndMerges(t *testing.T) {
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	vars := map[string]string{
+		"REPO":    repoName,
+		"STORAGE": storage,
+		"BRANCH":  mainBranch,
+	}
+
+	featureBranch := "feature"
+	branchVars := map[string]string{
+		"REPO":          repoName,
+		"STORAGE":       storage,
+		"SOURCE_BRANCH": mainBranch,
+		"DEST_BRANCH":   featureBranch,
+		"BRANCH":        featureBranch,
+	}
+
+	filePath1 := "file1"
+	filePath2 := "file2"
+
+	// create repo with 'main' branch
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" repo create lakefs://"+repoName+" "+storage, false, "lakectl_repo_create", vars)
+
+	// upload 'file1' and commit
+	vars["FILE_PATH"] = filePath1
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k lakefs://"+repoName+"/"+mainBranch+"/"+filePath1, false, "lakectl_fs_upload", vars)
+	commitMessage := "first commit to main"
+	vars["MESSAGE"] = commitMessage
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" commit lakefs://"+repoName+"/"+mainBranch+" -m \""+commitMessage+"\"", false, "lakectl_commit", vars)
+
+	// create new branch 'feature'
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" branch create lakefs://"+repoName+"/"+featureBranch+" --source lakefs://"+repoName+"/"+mainBranch, false, "lakectl_branch_create", branchVars)
+
+	// upload 'file2' to feature branch and commit
+	branchVars["FILE_PATH"] = filePath2
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k lakefs://"+repoName+"/"+featureBranch+"/"+filePath2, false, "lakectl_fs_upload", branchVars)
+	commitMessage = "second commit to feature branch"
+	branchVars["MESSAGE"] = commitMessage
+	vars["SECOND_MESSAGE"] = commitMessage
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" commit lakefs://"+repoName+"/"+featureBranch+" -m \""+commitMessage+"\"", false, "lakectl_commit", branchVars)
+
+	// merge feature into main
+	branchVars["SOURCE_BRANCH"] = featureBranch
+	branchVars["DEST_BRANCH"] = mainBranch
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" merge lakefs://"+repoName+"/"+featureBranch+" lakefs://"+repoName+"/"+mainBranch, false, "lakectl_merge_success", branchVars)
+
+	// log the commits without merges
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" log lakefs://"+repoName+"/"+mainBranch+" --no-merges", false, "lakectl_log_no_merges", vars)
+}
+
+func TestLakectlLogNoMergesAndAmount(t *testing.T) {
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	vars := map[string]string{
+		"REPO":    repoName,
+		"STORAGE": storage,
+		"BRANCH":  mainBranch,
+	}
+
+	featureBranch := "feature"
+	branchVars := map[string]string{
+		"REPO":          repoName,
+		"STORAGE":       storage,
+		"SOURCE_BRANCH": mainBranch,
+		"DEST_BRANCH":   featureBranch,
+		"BRANCH":        featureBranch,
+	}
+
+	filePath1 := "file1"
+	filePath2 := "file2"
+
+	// create repo with 'main' branch
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" repo create lakefs://"+repoName+" "+storage, false, "lakectl_repo_create", vars)
+
+	// upload 'file1' and commit
+	vars["FILE_PATH"] = filePath1
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k lakefs://"+repoName+"/"+mainBranch+"/"+filePath1, false, "lakectl_fs_upload", vars)
+	commitMessage := "first commit to main"
+	vars["MESSAGE"] = commitMessage
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" commit lakefs://"+repoName+"/"+mainBranch+" -m \""+commitMessage+"\"", false, "lakectl_commit", vars)
+
+	// create new branch 'feature'
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" branch create lakefs://"+repoName+"/"+featureBranch+" --source lakefs://"+repoName+"/"+mainBranch, false, "lakectl_branch_create", branchVars)
+
+	// upload 'file2' to feature branch and commit
+	branchVars["FILE_PATH"] = filePath2
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload -s files/ro_1k lakefs://"+repoName+"/"+featureBranch+"/"+filePath2, false, "lakectl_fs_upload", branchVars)
+	commitMessage = "second commit to feature branch"
+	branchVars["MESSAGE"] = commitMessage
+	vars["SECOND_MESSAGE"] = commitMessage
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" commit lakefs://"+repoName+"/"+featureBranch+" -m \""+commitMessage+"\"", false, "lakectl_commit", branchVars)
+
+	// merge feature into main
+	branchVars["SOURCE_BRANCH"] = featureBranch
+	branchVars["DEST_BRANCH"] = mainBranch
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" merge lakefs://"+repoName+"/"+featureBranch+" lakefs://"+repoName+"/"+mainBranch, false, "lakectl_merge_success", branchVars)
+
+	// log the commits without merges
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" log lakefs://"+repoName+"/"+mainBranch+" --no-merges --amount=2", false, "lakectl_log_no_merges_amount", vars)
+}
+
 func TestLakectlAnnotate(t *testing.T) {
 	repoName := generateUniqueRepositoryName()
 	storage := generateUniqueStorageNamespace(repoName)
@@ -402,55 +573,37 @@ func TestLakectlAnnotate(t *testing.T) {
 }
 
 func TestLakectlAuthUsers(t *testing.T) {
+	ctx := context.Background()
 	userName := "test_user"
 	vars := map[string]string{
 		"ID": userName,
 	}
+	isSupported := !isBasicAuth(t, ctx)
 
 	// Not Found
 	RunCmdAndVerifyFailure(t, Lakectl()+" auth users delete --id "+userName, false, "user not found\n404 Not Found\n", vars)
 
 	// Check unique
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" auth users create --id "+userName, false, "lakectl_auth_users_create_success", vars)
+	if isSupported {
+		RunCmdAndVerifySuccessWithFile(t, Lakectl()+" auth users create --id "+userName, false, "lakectl_auth_users_create_success", vars)
+	}
 	RunCmdAndVerifyFailure(t, Lakectl()+" auth users create --id "+userName, false, "Already exists\n409 Conflict\n", vars)
 
 	// Cleanup
-	RunCmdAndVerifySuccess(t, Lakectl()+" auth users delete --id "+userName, false, "User deleted successfully\n", vars)
+	expected := "user not found\n404 Not Found\n"
+	if isSupported {
+		expected = "User deleted successfully\n"
+	}
+	runCmdAndVerifyResult(t, Lakectl()+" auth users delete --id "+userName, !isSupported, false, expected, vars)
 }
 
-func TestLakectlIngestS3(t *testing.T) {
-	// Specific S3 test - due to the limitation on ingest source type that has to match lakefs underlying block store,
-	// this test can only run on AWS setup, and therefore is skipped for other store types
-	skipOnSchemaMismatch(t, IngestTestBucketPath)
-
-	repoName := generateUniqueRepositoryName()
-	storage := generateUniqueStorageNamespace(repoName)
+// testing without user email for now, since it is a pain to config esti with a mail
+func TestLakectlIdentity(t *testing.T) {
+	userId := "mike"
 	vars := map[string]string{
-		"REPO":    repoName,
-		"STORAGE": storage,
-		"BRANCH":  mainBranch,
+		"ID": userId,
 	}
-
-	const (
-		lakectlIngestBucket  = "lakectl-ingest-test-data"
-		expectedIngestOutput = "Staged 10 external objects (total of 10.2 kB)"
-	)
-
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" repo create lakefs://"+repoName+" "+storage, false, "lakectl_repo_create", vars)
-	RunCmdAndVerifyContainsText(t, Lakectl()+" ingest --from s3://"+lakectlIngestBucket+" --to lakefs://"+repoName+"/"+mainBranch+"/", false, expectedIngestOutput, vars)
-	RunCmdAndVerifyContainsText(t, Lakectl()+" ingest --from s3://"+lakectlIngestBucket+" --to lakefs://"+repoName+"/"+mainBranch+"/to-pref/", false, expectedIngestOutput, vars)
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs ls lakefs://"+repoName+"/"+mainBranch+"/", false, "lakectl_fs_ls_after_ingest", vars)
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs ls lakefs://"+repoName+"/"+mainBranch+"/ --recursive", false, "lakectl_fs_ls_after_ingest_recursive", vars)
-
-	// rerunning the same ingest command should succeed and have no effect
-	RunCmdAndVerifyContainsText(t, Lakectl()+" ingest --from s3://"+lakectlIngestBucket+" --to lakefs://"+repoName+"/"+mainBranch+"/", false, expectedIngestOutput, vars)
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs ls lakefs://"+repoName+"/"+mainBranch+"/", false, "lakectl_fs_ls_after_ingest", vars)
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs ls lakefs://"+repoName+"/"+mainBranch+"/ --recursive", false, "lakectl_fs_ls_after_ingest_recursive", vars)
-
-	// 'from' can also be specified with terminating "/"
-	RunCmdAndVerifyContainsText(t, Lakectl()+" ingest --from s3://"+lakectlIngestBucket+"/ --to lakefs://"+repoName+"/"+mainBranch+"/", false, expectedIngestOutput, vars)
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs ls lakefs://"+repoName+"/"+mainBranch+"/", false, "lakectl_fs_ls_after_ingest", vars)
-	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs ls lakefs://"+repoName+"/"+mainBranch+"/ --recursive", false, "lakectl_fs_ls_after_ingest_recursive", vars)
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" identity", false, "lakectl_identity", vars)
 }
 
 func TestLakectlFsDownload(t *testing.T) {
@@ -557,13 +710,7 @@ func TestLakectlFsUpload(t *testing.T) {
 	})
 	t.Run("single_file_with_recursive", func(t *testing.T) {
 		vars["FILE_PATH"] = "data/ro/ro_1k.0"
-		sanitizedResult := runCmd(t, Lakectl()+" fs upload --recursive -s files/ro_1k lakefs://"+repoName+"/"+mainBranch+"/"+vars["FILE_PATH"], false, false, vars)
-		require.Contains(t, sanitizedResult, "diff 'local://files/ro_1k/' <--> 'lakefs://"+repoName+"/"+mainBranch+"/"+vars["FILE_PATH"]+"'...")
-		require.Contains(t, sanitizedResult, "upload .")
-		require.Contains(t, sanitizedResult, "Upload Summary:")
-		require.Contains(t, sanitizedResult, "Downloaded: 0")
-		require.Contains(t, sanitizedResult, "Uploaded: 1")
-		require.Contains(t, sanitizedResult, "Removed: 0")
+		RunCmdAndVerifySuccessWithFile(t, Lakectl()+" fs upload --recursive -s files/ro_1k lakefs://"+repoName+"/"+mainBranch+"/"+vars["FILE_PATH"]+" -s files/ro_1k", false, "lakectl_fs_upload", vars)
 	})
 	t.Run("dir", func(t *testing.T) {
 		vars["FILE_PATH"] = "data/ro/"
@@ -589,6 +736,10 @@ func TestLakectlFsUpload(t *testing.T) {
 		vars["FILE_PATH"] = "data/ro/"
 		RunCmdAndVerifyFailure(t, Lakectl()+" fs upload -s files/ lakefs://"+repoName+"/"+mainBranch+"/"+vars["FILE_PATH"], false, "target path is not a valid URI\nError executing command.\n", vars)
 	})
+	t.Run("dir_without_recursive_to_file", func(t *testing.T) {
+		vars["FILE_PATH"] = "data/ro/1.txt"
+		RunCmdAndVerifyFailureContainsText(t, Lakectl()+" fs upload -s files/ lakefs://"+repoName+"/"+mainBranch+"/"+vars["FILE_PATH"], false, "read files/: is a directory", vars)
+	})
 }
 
 func getStorageConfig(t *testing.T) *apigen.StorageConfig {
@@ -600,6 +751,43 @@ func getStorageConfig(t *testing.T) *apigen.StorageConfig {
 		t.Fatalf("GetStorageConfig failed with stats: %s", storageResp.Status())
 	}
 	return storageResp.JSON200
+}
+
+func TestLakectlFsUpload_protectedBranch(t *testing.T) {
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	vars := map[string]string{
+		"REPO":    repoName,
+		"STORAGE": storage,
+		"BRANCH":  mainBranch,
+	}
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" repo create lakefs://"+vars["REPO"]+" "+vars["STORAGE"], false, "lakectl_repo_create", vars)
+	runCmd(t, Lakectl()+" branch-protect add lakefs://"+vars["REPO"]+"/  '*'", false, false, vars)
+	RunCmdAndVerifyContainsText(t, Lakectl()+" branch-protect list lakefs://"+vars["REPO"]+"/ ", false, "*", vars)
+	// BranchUpdateMaxInterval - sleep in order to overcome branch update caching
+	time.Sleep(branchProtectTimeout)
+	vars["FILE_PATH"] = "ro_1k.0"
+	RunCmdAndVerifyFailure(t, Lakectl()+" fs upload lakefs://"+vars["REPO"]+"/"+vars["BRANCH"]+"/"+vars["FILE_PATH"]+" -s files/ro_1k", false, "cannot write to protected branch\n403 Forbidden\n", vars)
+}
+
+func TestLakectlFsRm_protectedBranch(t *testing.T) {
+	repoName := generateUniqueRepositoryName()
+	storage := generateUniqueStorageNamespace(repoName)
+	vars := map[string]string{
+		"REPO":    repoName,
+		"STORAGE": storage,
+		"BRANCH":  mainBranch,
+	}
+
+	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" repo create lakefs://"+vars["REPO"]+" "+vars["STORAGE"], false, "lakectl_repo_create", vars)
+	vars["FILE_PATH"] = "ro_1k.0"
+	runCmd(t, Lakectl()+" fs upload lakefs://"+vars["REPO"]+"/"+vars["BRANCH"]+"/"+vars["FILE_PATH"]+" -s files/ro_1k", false, false, vars)
+	runCmd(t, Lakectl()+" commit lakefs://"+vars["REPO"]+"/"+vars["BRANCH"]+" --allow-empty-message -m \" \"", false, false, vars)
+	runCmd(t, Lakectl()+" branch-protect add lakefs://"+vars["REPO"]+"/  '*'", false, false, vars)
+	// BranchUpdateMaxInterval - sleep in order to overcome branch update caching
+	time.Sleep(branchProtectTimeout)
+	RunCmdAndVerifyContainsText(t, Lakectl()+" branch-protect list lakefs://"+vars["REPO"]+"/ ", false, "*", vars)
+	RunCmdAndVerifyFailure(t, Lakectl()+" fs rm lakefs://"+vars["REPO"]+"/"+vars["BRANCH"]+"/"+vars["FILE_PATH"], false, "cannot write to protected branch\n403 Forbidden\n", vars)
 }
 
 func TestLakectlFsPresign(t *testing.T) {
@@ -699,6 +887,7 @@ func TestLakectlFsStat(t *testing.T) {
 
 func TestLakectlImport(t *testing.T) {
 	// TODO(barak): generalize test to work all supported object stores
+	const IngestTestBucketPath = "s3://esti-system-testing-data/ingest-test-data/"
 	skipOnSchemaMismatch(t, IngestTestBucketPath)
 
 	repoName := generateUniqueRepositoryName()
@@ -857,6 +1046,7 @@ func TestLakectlBranchProtection(t *testing.T) {
 	RunCmdAndVerifySuccessWithFile(t, Lakectl()+" branch-protect list lakefs://"+repoName, false, "lakectl_branch_protection_list.term", vars)
 }
 
+// TestLakectlAbuse runs a series of abuse commands to test the functionality of lakectl abuse (not in order to test how lakeFS handles abuse)
 func TestLakectlAbuse(t *testing.T) {
 	repoName := generateUniqueRepositoryName()
 	storage := generateUniqueStorageNamespace(repoName)
@@ -880,6 +1070,10 @@ func TestLakectlAbuse(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
+	const (
+		abuseAmount      = 50
+		abuseParallelism = 3
+	)
 	tests := []struct {
 		Cmd            string
 		Amount         int
@@ -890,30 +1084,34 @@ func TestLakectlAbuse(t *testing.T) {
 			Amount: 10,
 		},
 		{
-			Cmd:    "create-branches",
-			Amount: 1000,
+			Cmd:            "create-branches",
+			Amount:         abuseAmount,
+			AdditionalArgs: fmt.Sprintf("--parallelism %d", abuseParallelism),
 		},
 		{
-			Cmd:    "link-same-object",
-			Amount: 1000,
+			Cmd:            "link-same-object",
+			Amount:         abuseAmount,
+			AdditionalArgs: fmt.Sprintf("--parallelism %d", abuseParallelism),
 		},
 		{
-			Cmd:    "list",
-			Amount: 1000,
+			Cmd:            "list",
+			Amount:         abuseAmount,
+			AdditionalArgs: fmt.Sprintf("--parallelism %d", abuseParallelism),
 		},
 		{
 			Cmd:            "random-read",
-			Amount:         1000,
-			AdditionalArgs: "--from-file " + f.Name(),
+			Amount:         abuseAmount,
+			AdditionalArgs: fmt.Sprintf("--parallelism %d --from-file %s", abuseParallelism, f.Name()),
 		},
 		{
 			Cmd:            "random-delete",
-			Amount:         1000,
-			AdditionalArgs: "--from-file " + f.Name(),
+			Amount:         abuseAmount,
+			AdditionalArgs: fmt.Sprintf("--parallelism %d --from-file %s", abuseParallelism, f.Name()),
 		},
 		{
-			Cmd:    "random-write",
-			Amount: 1000,
+			Cmd:            "random-write",
+			Amount:         abuseAmount,
+			AdditionalArgs: fmt.Sprintf("--parallelism %d", abuseParallelism),
 		},
 	}
 	for _, tt := range tests {

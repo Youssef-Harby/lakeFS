@@ -6,7 +6,7 @@ parent: Integrations
 
 # Using lakeFS with Delta Lake
 
-[Delta Lake](https://delta.io/) Delta Lake is an open-source storage framework designed to improve performance and provide transactional guarantees to data lake tables.
+[Delta Lake](https://delta.io/) is an open-source storage framework designed to improve performance and provide transactional guarantees to data lake tables.
 
 Because lakeFS is format-agnostic, you can save data in Delta format within a lakeFS repository and benefit from the advantages of both technologies. Specifically:
 
@@ -85,6 +85,8 @@ SELECT * FROM my_catalog.main.my_delta_table
 Here, 'main' is the name of the lakeFS branch from which the delta table was exported.
 
 To enable Delta table exports to Unity catalog use the Unity [catalog integration guide](unity-catalog.md).
+
+<iframe width="420" height="315" src="https://www.youtube.com/embed/rMDsnh7S2O0"></iframe>
 
 ## Limitations
 

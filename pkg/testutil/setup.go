@@ -56,7 +56,7 @@ func SetupTestingEnv(params *SetupTestingEnvParams) (logging.Logger, apigen.Clie
 	}
 	viper.SetDefault("glue_export_hooks_database", "export-hooks-esti")
 	viper.SetDefault("glue_export_region", "us-east-1")
-	viper.SetDefault("lakectl_dir", filepath.Join(currDir, ".."))
+	viper.SetDefault("binaries_dir", filepath.Join(currDir, ".."))
 	viper.SetDefault("azure_storage_account", "")
 	viper.SetDefault("azure_storage_access_key", "")
 	viper.SetDefault("large_object_path", "")
@@ -78,21 +78,24 @@ func SetupTestingEnv(params *SetupTestingEnvParams) (logging.Logger, apigen.Clie
 		logger.WithError(err).Fatal("could not initialize API client")
 	}
 
-	if err := waitUntilLakeFSRunning(ctx, logger, client); err != nil {
-		logger.WithError(err).Fatal("Waiting for lakeFS")
-	}
-
 	setupLakeFS := viper.GetBool("setup_lakefs")
 	if setupLakeFS {
+		if err := waitUntilLakeFSRunning(ctx, logger, client); err != nil {
+			logger.WithError(err).Fatal("Waiting for lakeFS")
+		}
+
 		// first setup of lakeFS
 		mockEmail := "test@acme.co"
-		_, err := client.SetupCommPrefsWithResponse(context.Background(), apigen.SetupCommPrefsJSONRequestBody{
+		commResp, err := client.SetupCommPrefsWithResponse(context.Background(), apigen.SetupCommPrefsJSONRequestBody{
 			Email:           &mockEmail,
 			FeatureUpdates:  false,
 			SecurityUpdates: false,
 		})
 		if err != nil {
 			logger.WithError(err).Fatal("Failed to setup lakeFS")
+		}
+		if commResp.StatusCode() != http.StatusOK {
+			logger.WithField("status", commResp.HTTPResponse.Status).Fatal("Failed to setup lakeFS")
 		}
 		adminUserName := params.Name
 		requestBody := apigen.SetupJSONRequestBody{
@@ -128,14 +131,15 @@ func SetupTestingEnv(params *SetupTestingEnvParams) (logging.Logger, apigen.Clie
 	}
 
 	s3Endpoint := viper.GetString("s3_endpoint")
-	svc, err := SetupTestS3Client(s3Endpoint, key, secret)
+	forcePathStyle := viper.GetBool("force_path_style")
+	svc, err := SetupTestS3Client(s3Endpoint, key, secret, forcePathStyle)
 	if err != nil {
 		logger.WithError(err).Fatal("could not initialize S3 client")
 	}
 	return logger, client, svc, endpointURL
 }
 
-func SetupTestS3Client(endpoint, key, secret string) (*s3.Client, error) {
+func SetupTestS3Client(endpoint, key, secret string, forcePathStyle bool) (*s3.Client, error) {
 	if !strings.HasPrefix(endpoint, "http") {
 		endpoint = "http://" + endpoint
 	}
@@ -146,10 +150,9 @@ func SetupTestS3Client(endpoint, key, secret string) (*s3.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	forcePathStyleS3Client := viper.GetBool("force_path_style")
 	svc := s3.NewFromConfig(cfg, func(options *s3.Options) {
 		options.BaseEndpoint = aws.String(endpoint)
-		options.UsePathStyle = forcePathStyleS3Client
+		options.UsePathStyle = forcePathStyle
 	})
 	return svc, nil
 }
@@ -183,12 +186,15 @@ func waitUntilLakeFSRunning(ctx context.Context, logger logging.Logger, cl apige
 	setupCtx, cancel := context.WithTimeout(ctx, viper.GetDuration("setup_lakefs_timeout"))
 	defer cancel()
 	for {
-		_, err := cl.HealthCheckWithResponse(setupCtx)
-		if err == nil {
-			return nil
+		resp, err := cl.HealthCheckWithResponse(setupCtx)
+		if err != nil {
+			logger.WithError(err).Info("Setup failed")
+		} else {
+			if resp.StatusCode() == http.StatusNoContent {
+				return nil
+			}
+			logger.WithField("status", resp.HTTPResponse.Status).Warning("Bad status on healthcheck")
 		}
-		logger.WithError(err).Info("Setup failed")
-
 		select {
 		case <-setupCtx.Done():
 			return setupCtx.Err()

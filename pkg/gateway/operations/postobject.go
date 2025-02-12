@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/treeverse/lakefs/pkg/block"
+	"github.com/treeverse/lakefs/pkg/catalog"
 	gatewayErrors "github.com/treeverse/lakefs/pkg/gateway/errors"
 	"github.com/treeverse/lakefs/pkg/gateway/multipart"
 	"github.com/treeverse/lakefs/pkg/gateway/path"
@@ -53,6 +54,7 @@ func (controller *PostObject) HandleCreateMultipartUpload(w http.ResponseWriter,
 	storageClass := StorageClassFromHeader(req.Header)
 	opts := block.CreateMultiPartUploadOpts{StorageClass: storageClass}
 	resp, err := o.BlockStore.CreateMultiPartUpload(req.Context(), block.ObjectPointer{
+		StorageID:        o.Repository.StorageID,
 		StorageNamespace: o.Repository.StorageNamespace,
 		IdentifierType:   block.IdentifierTypeRelative,
 		Identifier:       address,
@@ -94,6 +96,23 @@ func (controller *PostObject) HandleCompleteMultipartUpload(w http.ResponseWrite
 		_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrInternalError))
 		return
 	}
+	// check and validate whether if-none-match header provided
+	allowOverwrite, err := o.checkIfAbsent(req)
+	if err != nil {
+		_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrNotImplemented))
+		return
+	}
+	// before writing body, ensure preconditions - this means we essentially check for object existence twice:
+	// once here, before uploading the body to save resources and time,
+	// and then graveler will check again when passed a SetOptions.
+	if !allowOverwrite {
+		_, err := o.Catalog.GetEntry(req.Context(), o.Repository.Name, o.Reference, o.Path, catalog.GetEntryParams{})
+		if err == nil {
+			// In case object exists in catalog, no error returns
+			_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrPreconditionFailed))
+			return
+		}
+	}
 	objName := multiPart.PhysicalAddress
 	req = req.WithContext(logging.AddFields(req.Context(), logging.Fields{logging.PhysicalAddressFieldKey: objName}))
 	xmlMultipartComplete, err := io.ReadAll(req.Body)
@@ -112,6 +131,7 @@ func (controller *PostObject) HandleCompleteMultipartUpload(w http.ResponseWrite
 	normalizeMultipartUploadCompletion(&multipartList)
 	resp, err := o.BlockStore.CompleteMultiPartUpload(req.Context(),
 		block.ObjectPointer{
+			StorageID:        o.Repository.StorageID,
 			StorageNamespace: o.Repository.StorageNamespace,
 			IdentifierType:   block.IdentifierTypeRelative,
 			Identifier:       objName,
@@ -124,7 +144,11 @@ func (controller *PostObject) HandleCompleteMultipartUpload(w http.ResponseWrite
 		return
 	}
 	checksum := strings.Split(resp.ETag, "-")[0]
-	err = o.finishUpload(req, checksum, objName, resp.ContentLength, true, multiPart.Metadata, multiPart.ContentType)
+	err = o.finishUpload(req, resp.MTime, checksum, objName, resp.ContentLength, true, multiPart.Metadata, multiPart.ContentType, allowOverwrite)
+	if errors.Is(err, graveler.ErrPreconditionFailed) {
+		_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrPreconditionFailed))
+		return
+	}
 	if errors.Is(err, graveler.ErrWriteToProtectedBranch) {
 		_ = o.EncodeError(w, req, err, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrWriteToProtectedBranch))
 		return
@@ -170,7 +194,10 @@ func (controller *PostObject) Handle(w http.ResponseWriter, req *http.Request, o
 	if o.HandleUnsupported(w, req, "select", "restore") {
 		return
 	}
-
+	if o.Repository.ReadOnly {
+		_ = o.EncodeError(w, req, nil, gatewayErrors.Codes.ToAPIErr(gatewayErrors.ErrReadOnlyRepository))
+		return
+	}
 	// POST is only supported for CreateMultipartUpload/CompleteMultipartUpload
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html
