@@ -20,10 +20,22 @@ export const DataLoader: FC = () => {
 
 export const DuckDBRenderer: FC<RendererComponent> = ({repoId, refId, path, fileExtension }) => {
     let initialQuery = `SELECT * FROM READ_PARQUET('lakefs://${repoId}/${refId}/${path}') LIMIT 20`;
-    if (fileExtension === 'csv') {
-        initialQuery = `SELECT *  FROM READ_CSV('lakefs://${repoId}/${refId}/${path}', AUTO_DETECT = TRUE) LIMIT 20`
-    } else if (fileExtension === 'tsv') {
-        initialQuery = `SELECT *  FROM READ_CSV('lakefs://${repoId}/${refId}/${path}', DELIM='\t', AUTO_DETECT=TRUE) LIMIT 20`
+    
+    // Spatial data formats using ST_Read
+    const spatialFormats = ['shp', 'tab', 'ntf', 'xml', 'dgn', 'vrt', 'gml', 'gpx', 'kml',
+        'geojsonseq', 'topojson', 'gpkg', 'sqlite', 'dxf', 'dwg', 'fgb',
+        'rss', 'osm', 'pbf', 'mvt', 'pmtiles'];
+    
+    if (fileExtension && spatialFormats.includes(fileExtension)) {
+        initialQuery = `SELECT * FROM ST_Read('lakefs://${repoId}/${refId}/${path}') LIMIT 20`;
+    } else if (fileExtension && fileExtension === 'csv') {
+        initialQuery = `SELECT * FROM READ_CSV('lakefs://${repoId}/${refId}/${path}', AUTO_DETECT = TRUE) LIMIT 20`;
+    } else if (fileExtension && fileExtension === 'tsv') {
+        initialQuery = `SELECT * FROM READ_CSV('lakefs://${repoId}/${refId}/${path}', DELIM='\t', AUTO_DETECT=TRUE) LIMIT 20`;
+    } else if (fileExtension && (fileExtension === 'xlsx' || fileExtension === 'ods')) {
+        initialQuery = `SELECT * FROM READ_XLSX('lakefs://${repoId}/${refId}/${path}') LIMIT 20`;
+    } else if (fileExtension && fileExtension === 'pbf') {
+        initialQuery = `SELECT * FROM ST_ReadOsm('lakefs://${repoId}/${refId}/${path}') LIMIT 20`;
     }
     const [shouldSubmit, setShouldSubmit] = useState<boolean>(true)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -187,5 +199,3 @@ const DataRow: FC<{ value: any }> = ({ value }) => {
 
     return <td>{""  + value}</td>;
 }
-
-
