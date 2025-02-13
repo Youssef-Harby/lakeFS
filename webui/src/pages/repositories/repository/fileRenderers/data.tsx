@@ -24,7 +24,7 @@ export const DuckDBRenderer: FC<RendererComponent> = ({repoId, refId, path, file
     // Spatial data formats using ST_Read
     const spatialFormats = ['shp', 'tab', 'ntf', 'xml', 'dgn', 'vrt', 'gml', 'gpx', 'kml',
         'geojsonseq', 'topojson', 'gpkg', 'sqlite', 'dxf', 'dwg', 'fgb',
-        'rss', 'osm', 'pbf', 'mvt', 'pmtiles'];
+        'rss', 'osm', 'pbf', 'mvt', 'pmtiles', 'geojson'];
     
     if (fileExtension && spatialFormats.includes(fileExtension)) {
         initialQuery = `SELECT * FROM ST_Read('lakefs://${repoId}/${refId}/${path}') LIMIT 20`;
