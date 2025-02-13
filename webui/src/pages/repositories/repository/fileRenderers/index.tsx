@@ -122,6 +122,31 @@ export function guessType(contentType: string | null, fileExtension: string | nu
         case 'parquet':
         case 'csv':
         case 'tsv':
+        case 'geojson':
+        case 'xlsx':
+        case 'shp':  // ESRI Shapefile
+        case 'tab':  // MapInfo File
+        case 'ntf':  // UK .NTF
+        case 'xml':  // LVBAG and others
+        case 'dgn':  // Microstation DGN
+        case 'vrt':  // VRT
+        case 'gml':  // Geography Markup Language
+        case 'gpx':  // GPX
+        case 'kml':  // Keyhole Markup Language
+        case 'geojsonseq': // GeoJSON Sequence
+        case 'topojson':   // TopoJSON
+        case 'gpkg': // GeoPackage
+        case 'sqlite': // SQLite / Spatialite
+        case 'dxf':  // AutoCAD DXF
+        case 'dwg':  // AutoCAD Driver
+        case 'fgb':  // FlatGeobuf
+        case 'rss':  // GeoRSS
+        case 'sql':  // PostgreSQL SQL dump
+        case 'osm':  // OpenStreetMap XML
+        case 'pbf':  // OpenStreetMap PBF
+        case 'ods':  // Open Document Spreadsheet
+        case 'mvt':  // Mapbox Vector Tiles
+        case 'pmtiles': // ProtoMap Tiles
             return FileType.DATA
         case 'md':
             return FileType.MARKDOWN
@@ -140,7 +165,6 @@ export function guessType(contentType: string | null, fileExtension: string | nu
         case 'text':
         case 'yaml':
         case 'yml':
-        case 'json':
         case 'jsonl':
         case 'ndjson':
             return FileType.TEXT
